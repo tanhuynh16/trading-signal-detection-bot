@@ -18,7 +18,7 @@ repository deviates, the reason is in [`docs/adr/`](docs/adr/).
 | Phase | Scope                                                            | State       |
 | ----- | ---------------------------------------------------------------- | ----------- |
 | 0     | Foundation: workspace, Docker, schema, config, logging, health   | **done**    |
-| 1     | Discovery: Uniswap V2/V3 + Aerodrome, dedupe, queueing           | not started |
+| 1     | Discovery: Uniswap V2/V3 + Aerodrome, dedupe, queueing           | **done**    |
 | 2     | Snapshot pipeline                                                | not started |
 | 3     | Risk engine                                                      | not started |
 | 4     | Features (liquidity, momentum, holders, clustering, smart money) | not started |
@@ -98,3 +98,6 @@ packages/*             discovery, risk-engine, snapshot-engine, feature-engine,
 - **Config changes mint a new `strategyVersion`**; historical signals keep their
   original meaning (§22).
 - **Thresholds are hypotheses**, not claims about profitability (§17, §28).
+- **Secrets never reach logs.** Register real values with `registerSecret()` at
+  startup; provider libraries quote their request URLs (API key included) inside
+  error messages, which field-name redaction alone cannot catch.

@@ -6,6 +6,10 @@
 export type Address = `0x${string}`;
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+
+/** A 32-byte hash: transaction or block. Distinct from a 20-byte Address. */
+export type Hash = `0x${string}`;
 
 export function isAddress(value: string): value is Address {
   return ADDRESS_RE.test(value);
@@ -18,6 +22,23 @@ export function canonicalize(value: string): Address {
     throw new TypeError(`not an address: ${value}`);
   }
   return trimmed.toLowerCase() as Address;
+}
+
+/**
+ * Canonical form for 32-byte hashes. Kept separate from `canonicalize` because
+ * feeding a tx hash to the address validator is a real and easy mistake — it
+ * passes type-checking (both are `0x${string}`) and fails only at runtime.
+ */
+export function canonicalizeHash(value: string): Hash {
+  const trimmed = value.trim();
+  if (!HASH_RE.test(trimmed)) {
+    throw new TypeError(`not a 32-byte hash: ${value}`);
+  }
+  return trimmed.toLowerCase() as Hash;
+}
+
+export function isHash(value: string): value is Hash {
+  return HASH_RE.test(value);
 }
 
 export function equalsAddress(a: string, b: string): boolean {

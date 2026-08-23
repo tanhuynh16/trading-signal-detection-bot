@@ -17,14 +17,17 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 /**
  * Spec §23: jobs must be idempotent. BullMQ deduplicates on job ID, so identity
  * is derived from the work itself — never from a timestamp or random value.
+ *
+ * Separator is '.' because BullMQ rejects ':' in custom job IDs (it reserves
+ * the colon for its own Redis key namespacing).
  */
 export const jobId = {
-  discoveryAnalysis: (poolId: string) => `discovery:${poolId}`,
-  snapshot: (poolId: string, offsetLabel: string) => `snapshot:${poolId}:${offsetLabel}`,
-  riskAnalysis: (tokenId: string, poolId: string) => `risk:${tokenId}:${poolId}`,
-  featureCalculation: (poolId: string, offsetLabel: string) => `features:${poolId}:${offsetLabel}`,
-  notification: (signalId: string, alertLevel: string) => `notify:${signalId}:${alertLevel}`,
-  outcome: (signalId: string, horizon: string) => `outcome:${signalId}:${horizon}`,
+  discoveryAnalysis: (poolId: string) => `discovery.${poolId}`,
+  snapshot: (poolId: string, offsetLabel: string) => `snapshot.${poolId}.${offsetLabel}`,
+  riskAnalysis: (tokenId: string, poolId: string) => `risk.${tokenId}.${poolId}`,
+  featureCalculation: (poolId: string, offsetLabel: string) => `features.${poolId}.${offsetLabel}`,
+  notification: (signalId: string, alertLevel: string) => `notify.${signalId}.${alertLevel}`,
+  outcome: (signalId: string, horizon: string) => `outcome.${signalId}.${horizon}`,
 };
 
 /** Spec §23: bounded exponential backoff, never infinite retry. */

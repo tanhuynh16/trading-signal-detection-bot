@@ -10,7 +10,7 @@ gap resolutions below by their G-numbers.
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Foundation: workspace, Docker, schema, config, logging, health | **done** |
-| 1 | Discovery: Uniswap V2/V3 + Aerodrome, dedupe, queueing | not started |
+| 1 | Discovery: Uniswap V2/V3 + Aerodrome, dedupe, queueing | **done** |
 | 2 | Snapshot pipeline | not started |
 | 3 | Risk engine | not started |
 | 4a | Features: liquidity, momentum | not started |
@@ -119,7 +119,7 @@ invalid config aborts startup with a readable error.
 *Known limitation:* `docker compose up` is unverified — no container runtime was
 installed on the build machine. The other two criteria are verified.
 
-### Phase 1 — Discovery (§10, §11)
+### Phase 1 — Discovery (§10, §11) ✅
 Adapters for Uniswap V2 `PairCreated`, Uniswap V3 `PoolCreated`, and Aerodrome
 `PoolCreated(…, bool stable, …)`. **Factory addresses must be verified against
 official deployment docs and stored in config — never hardcoded from memory.**
@@ -129,9 +129,31 @@ overlap on restart. Quote-token allowlist normalization; pools with no
 allowlisted quote are kept at lower priority, never dropped. Dedupe on
 `(chain, pool_address)`, persisting the discovery row before enqueueing.
 
-*Accepted when (§10.3):* one record per new pool; duplicate delivery creates no
-duplicate; restart skips no blocks; one adapter throwing does not kill the
-process.
+*Accepted (§10.3):* verified live against Base — pools discovered across all
+three factories, no duplicate addresses, a restart resumed from the persisted
+cursor without re-creating rows, and a failing factory left the others running.
+
+*Verified factory addresses* (from each protocol's own deployment docs, pinned
+by a test against logs captured from Base mainnet):
+
+| Factory | Address |
+|---|---|
+| Uniswap V2 | `0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6` |
+| Uniswap V3 | `0x33128a8fC17869897dcE68Ed026d694621f6FDfD` |
+| Aerodrome | `0x420DD381b31aEf6683db6B902084cB0FFECe40Da` |
+
+*Design note — cursor-driven, WebSocket-triggered.* The persisted block cursor
+is the source of truth; the socket only decides *when* to drain. Live discovery,
+restart replay and first-start backfill are therefore one code path, and a
+dropped socket degrades to polling instead of silently losing events.
+
+*Provider constraint.* Alchemy's free tier caps `eth_getLogs` at a **10-block
+range**, so `DISCOVERY_LOG_CHUNK_BLOCKS` defaults to 10 and the fetcher halves
+and remembers the limit if a provider rejects it. The replay overlap is applied
+only on the first drain after startup: re-applying it every drain multiplied
+requests sixfold against that cap. Steady-state still hits occasional 429s,
+absorbed by bounded backoff — raising the tier or lowering
+`DISCOVERY_FIRST_START_BACKFILL_BLOCKS` would remove them.
 
 ### Phase 2 — Snapshot pipeline (§13)
 On-chain `MarketDataProvider` with per-DEX reserve/price readers in a single

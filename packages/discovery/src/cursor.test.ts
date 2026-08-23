@@ -1,0 +1,112 @@
+import { describe, expect, it } from 'vitest';
+import { planRange } from './cursor.js';
+
+/**
+ * Spec §10.3: "restarting the worker does not permanently skip blocks."
+ * These cases are the arithmetic that makes that true.
+ */
+describe('cursor range planning', () => {
+  it('seeds a bounded backfill on first start instead of scanning from genesis', () => {
+    const plan = planRange({
+      lastProcessed: null,
+      head: 50_000_000n,
+      overlapBlocks: 50,
+      firstStartBackfillBlocks: 300,
+    });
+    expect(plan.seeded).toBe(true);
+    expect(plan.fromBlock).toBe(49_999_700n);
+    expect(plan.toBlock).toBe(50_000_000n);
+  });
+
+  it('rewinds by the overlap on restart, re-reading rather than risking a gap', () => {
+    const plan = planRange({
+      lastProcessed: 1_000n,
+      head: 1_100n,
+      overlapBlocks: 50,
+      firstStartBackfillBlocks: 300,
+    });
+    // next would be 1001; overlap pulls it back to 951.
+    expect(plan.fromBlock).toBe(951n);
+    expect(plan.toBlock).toBe(1_100n);
+    expect(plan.seeded).toBe(false);
+  });
+
+  it('never rewinds below block zero', () => {
+    const plan = planRange({
+      lastProcessed: 5n,
+      head: 100n,
+      overlapBlocks: 500,
+      firstStartBackfillBlocks: 300,
+    });
+    expect(plan.fromBlock).toBe(0n);
+  });
+
+  it('never seeds below block zero on a short chain', () => {
+    const plan = planRange({
+      lastProcessed: null,
+      head: 100n,
+      overlapBlocks: 50,
+      firstStartBackfillBlocks: 300,
+    });
+    expect(plan.fromBlock).toBe(0n);
+  });
+
+  it('produces an empty range when already caught up to head', () => {
+    const plan = planRange({
+      lastProcessed: 1_000n,
+      head: 1_000n,
+      overlapBlocks: 0,
+      firstStartBackfillBlocks: 300,
+    });
+    // from = 1001 > to = 1000, so the caller skips the drain entirely.
+    expect(plan.fromBlock).toBeGreaterThan(plan.toBlock);
+  });
+
+  it('re-reads the last block when overlap is zero, never skipping one', () => {
+    const plan = planRange({
+      lastProcessed: 1_000n,
+      head: 1_005n,
+      overlapBlocks: 0,
+      firstStartBackfillBlocks: 300,
+    });
+    expect(plan.fromBlock).toBe(1_001n);
+  });
+
+  it('treats a zero-block backfill as start-at-head', () => {
+    const plan = planRange({
+      lastProcessed: null,
+      head: 500n,
+      overlapBlocks: 0,
+      firstStartBackfillBlocks: 0,
+    });
+    expect(plan.fromBlock).toBe(500n);
+    expect(plan.toBlock).toBe(500n);
+  });
+});
+
+describe('overlap is startup-only', () => {
+  const common = { head: 1_100n, overlapBlocks: 50, firstStartBackfillBlocks: 300 };
+
+  it('applies the overlap on the first drain after a restart', () => {
+    const plan = planRange({ lastProcessed: 1_000n, ...common, isFirstDrain: true });
+    expect(plan.fromBlock).toBe(951n);
+  });
+
+  it('does not re-apply it on steady-state drains', () => {
+    // Re-reading 50 blocks every drain multiplies request count against a
+    // provider that caps eth_getLogs at 10 blocks per call.
+    const plan = planRange({ lastProcessed: 1_000n, ...common, isFirstDrain: false });
+    expect(plan.fromBlock).toBe(1_001n);
+  });
+
+  it('still never skips a block in steady state', () => {
+    const plan = planRange({ lastProcessed: 1_000n, ...common, isFirstDrain: false });
+    // Resumes exactly one past the committed watermark: no gap, no re-read.
+    expect(plan.fromBlock).toBe(1_000n + 1n);
+  });
+
+  it('defaults to applying the overlap when the flag is omitted', () => {
+    const plan = planRange({ lastProcessed: 1_000n, ...common });
+    expect(plan.fromBlock).toBe(951n);
+  });
+});

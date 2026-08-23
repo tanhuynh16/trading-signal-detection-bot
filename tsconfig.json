@@ -1,11 +1,29 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/shared" },
-    { "path": "packages/config" },
-    { "path": "packages/domain" },
-    { "path": "packages/database" },
-    { "path": "apps/api" },
-    { "path": "apps/worker" }
+    {
+      "path": "packages/shared"
+    },
+    {
+      "path": "packages/config"
+    },
+    {
+      "path": "packages/domain"
+    },
+    {
+      "path": "packages/database"
+    },
+    {
+      "path": "packages/providers/blockchain"
+    },
+    {
+      "path": "packages/discovery"
+    },
+    {
+      "path": "apps/api"
+    },
+    {
+      "path": "apps/worker"
+    }
   ]
 }

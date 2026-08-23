@@ -4,6 +4,10 @@ import * as schema from './schema.js';
 
 export type Database = ReturnType<typeof createDatabase>['db'];
 
+/** The handle inside `db.transaction(...)`. Helpers accept either. */
+export type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
+export type DbOrTx = Database | Transaction;
+
 /**
  * One pool per process. `max` is deliberately modest: the worker's concurrency
  * is bounded by BullMQ, and spec §23 centralizes rate limiting rather than

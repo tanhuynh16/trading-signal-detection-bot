@@ -1,12 +1,33 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"],
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "src/**/*.test.ts"
+  ],
   "references": [
-    { "path": "../../packages/shared" },
-    { "path": "../../packages/config" },
-    { "path": "../../packages/domain" },
-    { "path": "../../packages/database" }
+    {
+      "path": "../../packages/shared"
+    },
+    {
+      "path": "../../packages/config"
+    },
+    {
+      "path": "../../packages/domain"
+    },
+    {
+      "path": "../../packages/database"
+    },
+    {
+      "path": "../../packages/providers/blockchain"
+    },
+    {
+      "path": "../../packages/discovery"
+    }
   ]
 }

@@ -1,4 +1,4 @@
-import type { Address } from '@sdb/shared';
+import type { Address, Hash } from '@sdb/shared';
 
 /** Spec §8 canonical domain types. Base only for v1 (§4). */
 export type Chain = 'base';
@@ -27,7 +27,7 @@ export type TokenCandidate = {
   quoteTokenAddress: Address;
   discoveredAt: Date;
   blockNumber: bigint;
-  transactionHash: Address;
+  transactionHash: Hash;
 };
 
 export type TokenMetadata = {
@@ -60,7 +60,7 @@ export type TradeSide = 'BUY' | 'SELL';
 
 export type Trade = {
   poolAddress: Address;
-  txHash: Address;
+  txHash: Hash;
   logIndex: number;
   wallet: Address;
   side: TradeSide;
