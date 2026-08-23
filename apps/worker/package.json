@@ -1,0 +1,19 @@
+{
+  "name": "@sdb/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@sdb/config": "workspace:*",
+    "@sdb/database": "workspace:*",
+    "@sdb/domain": "workspace:*",
+    "@sdb/shared": "workspace:*",
+    "bullmq": "^5.34.10",
+    "ioredis": "^5.4.2"
+  }
+}

@@ -1,0 +1,83 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sdb
+      POSTGRES_PASSWORD: sdb
+      POSTGRES_DB: sdb
+    ports: ['5432:5432']
+    volumes: ['pgdata:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U sdb -d sdb']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    # appendonly keeps delayed snapshot/outcome jobs across a restart (§13, §21).
+    command: ['redis-server', '--appendonly', 'yes']
+    ports: ['6379:6379']
+    volumes: ['redisdata:/data']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile
+    command: ['node', 'packages/database/dist/migrate.js']
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgres://sdb:sdb@postgres:5432/sdb
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: 'no'
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile
+    command: ['node', 'apps/api/dist/main.js']
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgres://sdb:sdb@postgres:5432/sdb
+      REDIS_URL: redis://redis:6379
+    ports: ['3000:3000']
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile
+    command: ['node', 'apps/worker/dist/main.js']
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgres://sdb:sdb@postgres:5432/sdb
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

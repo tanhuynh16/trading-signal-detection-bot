@@ -1,0 +1,32 @@
+{
+  "name": "signal-detection-bot",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build --force",
+    "clean": "tsc --build --clean && rm -rf packages/*/dist packages/providers/*/dist apps/*/dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "db:generate": "pnpm --filter @sdb/database generate",
+    "db:migrate": "pnpm --filter @sdb/database migrate",
+    "dev:api": "pnpm --filter @sdb/api dev",
+    "dev:worker": "pnpm --filter @sdb/worker dev"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/node": "^22.10.5",
+    "eslint": "^9.18.0",
+    "prettier": "^3.4.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.20.0",
+    "vitest": "^2.1.8"
+  }
+}

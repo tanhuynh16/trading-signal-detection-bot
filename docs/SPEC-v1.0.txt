@@ -1,0 +1,291 @@
+[Title] Signal Detection Bot
+Complete Technical Specification v1.0 — Implementation-ready specification for AI coding agents
+[Heading1] 1. Document Purpose
+This specification defines the MVP architecture, data model, pipeline, interfaces, formulas, state machines, risk rules, scoring framework, scheduling, observability, implementation tasks, and acceptance criteria for a crypto meme/new-token Signal Detection Bot.
+The intended reader is an AI coding agent (Claude Code/Cursor/Codex) or an engineer implementing the system. When this document conflicts with an implementation shortcut, this document takes precedence.
+[Heading1] 2. Product Goal
+Build a Base-first system that discovers newly created DEX pools, filters unsafe tokens, continuously collects measurable on-chain/market features, calculates an explainable alpha score, sends actionable Telegram alerts, and records future outcomes so strategies can be evaluated and tuned using data.
+[ListBullet] Primary goal: identify potentially interesting tokens; not to predict guaranteed winners.
+[ListBullet] MVP output: alert-only. No automatic trading.
+[ListBullet] Execution via Maestro or direct DEX execution is explicitly out of scope for MVP.
+[ListBullet] Every decision must be reproducible from stored snapshots and feature values.
+[Heading1] 3. Core Principles
+[ListBullet] Multi-signal, not single-signal.
+[ListBullet] Risk filtering is separate from alpha scoring.
+[ListBullet] Every feature must be measurable, timestamped, normalized, and backtestable.
+[ListBullet] Persist raw observations and derived features whenever practical.
+[ListBullet] Do not use LLMs or ML models in the critical real-time path for MVP.
+[ListBullet] Use provider abstractions so data sources can be replaced without rewriting business logic.
+[ListBullet] All thresholds are initial hypotheses and must be configuration-driven.
+[ListBullet] The system must distinguish discovery time, event/block time, snapshot time, signal time, and outcome time.
+[Heading1] 4. MVP Scope and Non-Goals
+--- TABLE ---
+In scope | Out of scope for v1
+Base chain only | Multi-chain
+Uniswap + Aerodrome discovery | Full DEX universe
+On-chain / market signals | X, Telegram, Discord social ingestion
+Rule-based scoring | ML model training
+Telegram alerts | Auto trading
+Manual smart-wallet seed list | Fully autonomous smart-wallet discovery
+PostgreSQL + Redis | Graph DB / Neo4j
+--- END TABLE ---
+[Heading1] 5. High-Level Architecture
+Base RPC / WebSocket        |        vPool Discovery Adapters        |        vNormalization + Deduplication        |        vCandidate Queue (Redis/BullMQ)        |        +-----------------------------+        |                             |        v                             vRisk Engine                     Snapshot Scheduler        |                             |   FAIL | PASS                        v        |                        Raw Market Data        v                             |     Ignore/Log <---------------------+                                      |                                      v                               Feature Engine                                      |                                      v                               Alpha Scoring                                      |                                      v                               Signal State Machine                                      |                        +-------------+-------------+                        |                           |                        v                           v                  Telegram Alert              Outcome Tracking                                                    |                                                    v                                             Strategy Evaluation
+[Heading1] 6. Recommended Repository Structure
+signal-detection-bot/  apps/    worker/    api/  packages/    shared/    config/    domain/    providers/      blockchain/      market-data/      security/    discovery/    risk-engine/    snapshot-engine/    feature-engine/    scoring/    signal-engine/    outcome-tracker/    notifications/    database/  infrastructure/    docker/  docs/  docker-compose.yml  README.md
+Implementation may begin as a modular monolith. Do not introduce microservices, Kubernetes, or distributed tracing unless required by load.
+[Heading1] 7. Technology Choices
+--- TABLE ---
+Area | Choice
+Language | TypeScript
+Runtime | Node.js
+Blockchain | Viem
+Database | PostgreSQL
+Queue / delayed jobs | Redis + BullMQ
+ORM | Prisma or Drizzle; choose one and use consistently
+Validation | Zod
+Logging | Structured JSON logger
+Notifications | Telegram Bot API
+Deployment | Docker Compose on VPS for MVP
+--- END TABLE ---
+[Heading1] 8. Canonical Domain Types
+type Chain = 'base';type RiskStatus = 'PASS' | 'WARNING' | 'FAIL';type SignalState =  | 'NEW'  | 'WATCHING'  | 'INTERESTING'  | 'STRONG_SIGNAL'  | 'EXPIRED';type AlertLevel = 'NONE' | 'INTERESTING' | 'STRONG';type TokenCandidate = {  chain: Chain;  tokenAddress: `0x${string}`;  poolAddress: `0x${string}`;  dex: 'uniswap' | 'aerodrome';  quoteTokenAddress: `0x${string}`;  discoveredAt: Date;  blockNumber: bigint;  transactionHash: `0x${string}`;};
+[Heading1] 9. Provider Abstractions
+Business logic must not directly depend on DexScreener, GeckoTerminal, a specific RPC vendor, or a security API.
+interface PoolDiscoveryProvider {  start(onPool: (pool: TokenCandidate) => Promise<void>): Promise<void>;  stop(): Promise<void>;}interface MarketDataProvider {  getTokenMetadata(address: string): Promise<TokenMetadata>;  getPoolSnapshot(poolAddress: string): Promise<PoolSnapshot>;  getTrades(poolAddress: string, from: Date, to: Date): Promise<Trade[]>;  getPrice(poolAddress: string): Promise<PricePoint | null>;}interface SecurityProvider {  analyzeToken(tokenAddress: string, poolAddress: string): Promise<SecurityReport>;}interface BlockchainProvider {  getCode(address: string): Promise<`0x${string}`>;  simulate(call: SimulationRequest): Promise<SimulationResult>;  getBlockTimestamp(blockNumber: bigint): Promise<Date>;}
+Initial implementation may use direct RPC for discovery plus one enrichment provider. External provider selection is an implementation detail behind interfaces.
+[Heading1] 10. Discovery Engine
+[Heading2] 10.1 Responsibilities
+[ListBullet] Listen for supported pool-creation events from Uniswap and Aerodrome on Base.
+[ListBullet] Convert provider-specific events to TokenCandidate.
+[ListBullet] Persist discovery event before expensive analysis.
+[ListBullet] Deduplicate by chain + pool address.
+[ListBullet] Enqueue candidate analysis.
+[Heading2] 10.2 Discovery Rules
+[ListBullet] Do not use GeckoTerminal/DexScreener polling as the primary low-latency discovery mechanism.
+[ListBullet] REST/indexer providers may enrich metadata and market statistics.
+[ListBullet] If WebSocket disconnects, reconnect with exponential backoff and log downtime.
+[ListBullet] On restart, persist last processed block and support replay with a configurable overlap window.
+[Heading2] 10.3 Acceptance Criteria
+[ListBullet] A newly observed supported pool creates exactly one pool record.
+[ListBullet] Duplicate event delivery does not create duplicate candidates.
+[ListBullet] Restarting the worker does not permanently skip blocks.
+[ListBullet] A provider failure does not crash the entire worker process.
+[Heading1] 11. Token Normalization
+[ListBullet] Determine candidate/base token versus known quote token.
+[ListBullet] Initial quote-token allowlist is configuration-driven, e.g. WETH, USDC, DAI where relevant.
+[ListBullet] If neither side is a known quote token, store pool but assign lower discovery priority; do not silently delete.
+[ListBullet] Persist token address as lowercase/checksummed canonical representation consistently.
+[Heading1] 12. Database Schema
+Use migrations. The following is the logical schema; exact ORM syntax may differ.
+--- TABLE ---
+Table | Purpose / key fields
+tokens | id, chain_id, address UNIQUE, symbol, name, decimals, first_seen_at, created_at
+pools | id, token_id, dex, address UNIQUE, quote_token_address, discovered_at, block_number
+token_snapshots | id, token_id, pool_id, captured_at, price_usd, market_cap_usd, liquidity_usd, volume fields, buy/sell counts
+trades | optional normalized raw trade records: tx_hash, wallet, side, amount, usd_value, occurred_at
+wallets | id, chain_id, address UNIQUE, source, alpha_score, metrics timestamps
+wallet_clusters | cluster relationship evidence
+risk_results | token_id, evaluated_at, status, score, flags JSON
+feature_sets | token_id, calculated_at, feature_version, values JSON, normalized values JSON
+signals | token_id, created_at, state, alpha_score, strategy_version, alert_level
+signal_outcomes | signal_id, horizon, price, return_pct, max_runup_pct, max_drawdown_pct
+jobs_audit | optional job execution and failure history
+--- END TABLE ---
+[Heading1] 13. Snapshot Scheduling
+For each candidate that passes minimum discovery checks, schedule snapshots at the following offsets from discovery time:
+T+0, T+30s, T+1m, T+2m, T+5m, T+10m, T+30m, T+1h
+[ListBullet] Use BullMQ delayed jobs or an equivalent durable scheduler.
+[ListBullet] Each job is idempotent using token/pool + scheduled offset as unique identity.
+[ListBullet] A snapshot job fetches data, stores raw normalized values, then may trigger feature recomputation.
+[ListBullet] Tracking can stop early if token is FAIL, pool is unavailable for a configurable duration, or token reaches configured expiry.
+[ListBullet] Do not recursively create unbounded jobs.
+[Heading1] 14. Risk Engine
+[Heading2] 14.1 Decision Model
+Risk is a gate, not a positive alpha contributor.
+--- TABLE ---
+Flag | Initial severity | Default action
+Cannot buy / invalid route | Critical | FAIL
+Cannot sell / honeypot behavior | Critical | FAIL
+Blacklist capability | Critical | FAIL or explicit config override
+Severe trading restriction | Critical | FAIL
+Owner can mint | High | WARNING
+Unusual transfer tax | High | WARNING or FAIL by threshold
+LP / liquidity concerns | Medium | WARNING
+Extreme holder concentration | High | WARNING; optionally FAIL by config
+--- END TABLE ---
+The exact interpretation must be configurable and the raw security-provider response should be retained where feasible.
+[Heading2] 14.2 Risk Evaluation Result
+type RiskResult = {  status: RiskStatus;  riskScore: number; // 0 = safest, 100 = riskiest  flags: Array<{    code: string;    severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';    message: string;  }>;  evaluatedAt: Date;};
+[Heading1] 15. Feature Engine
+Feature calculations must be pure functions where possible: inputs are snapshots/trades/wallet data; outputs are named numeric values plus null when insufficient data exists. Do not silently substitute zero for unavailable data.
+[Heading2] 15.1 Liquidity Features
+--- TABLE ---
+Feature | Formula / definition
+liquidity_usd | Current pool liquidity in USD
+liquidity_growth_5m | (current_liquidity - liquidity_5m_ago) / max(liquidity_5m_ago, epsilon)
+liquidity_stability | 1 - normalized absolute change volatility across recent liquidity samples
+mc_liquidity_ratio | market_cap_usd / max(liquidity_usd, epsilon)
+--- END TABLE ---
+[Heading2] 15.2 Momentum Features
+--- TABLE ---
+Feature | Formula / definition
+volume_acceleration_5m | current 5m volume / average(previous three comparable 5m windows); null if history insufficient
+buy_sell_ratio | buy_count / max(sell_count, 1)
+trade_velocity | number of trades / window duration
+unique_buyer_growth | unique buyers in current window relative to previous window
+--- END TABLE ---
+Example: current 5m volume = $50k; previous windows = $10k, $12k, $8k; average = $10k; acceleration = 5.0.
+[Heading2] 15.3 Holder Quality Features
+--- TABLE ---
+Feature | Definition
+holder_count | Current number of non-zero holders
+holder_growth_rate | (holders_now - holders_previous) / elapsed_minutes
+top10_concentration | sum of balances of top 10 holders / total supply, adjusted to exclude known LP/burn addresses where configured
+holder_retention | buyers/new holders from a prior cohort still holding non-dust balance after horizon / cohort size
+--- END TABLE ---
+Dust threshold must be configuration-driven.
+[Heading2] 15.4 Wallet Clustering Features
+[ListBullet] same_funder: wallets funded by the same source.
+[ListBullet] same_funding_tx: wallets receiving funds in the same transaction.
+[ListBullet] similar_funding_time: configurable time proximity.
+[ListBullet] similar_funding_amount: configurable percentage tolerance.
+[ListBullet] cluster_concentration: percentage of tracked token holdings attributable to a detected cluster.
+MVP uses deterministic heuristics. Do not introduce a graph database.
+[Heading2] 15.5 Smart Money Features
+MVP starts with a manually seeded wallet list plus performance metadata. Autonomous discovery is deferred.
+--- TABLE ---
+Metric | Definition
+independent_smart_wallet_count | Count of smart wallets after clustering related wallets
+smart_wallet_entry_recency | How recently smart wallets entered
+smart_wallet_quality | Aggregate of wallet alpha scores
+--- END TABLE ---
+wallet_alpha_score =  0.20 * historical_roi_score +  0.15 * win_rate_score +  0.20 * consistency_score +  0.25 * early_entry_accuracy_score +  0.20 * recent_performance_score
+This is an initial hypothesis. Scores must be versioned and recalculated without losing historical values.
+[Heading1] 16. Feature Normalization
+[ListBullet] Raw features must not be directly summed when scales differ.
+[ListBullet] Implement reusable normalizers: min-max with clipping, log transform where appropriate, and bounded ratio scoring.
+[ListBullet] Normalization parameters belong to strategy configuration and are versioned.
+[ListBullet] Null feature values must be explicitly represented; scoring defines whether missing data excludes a feature or applies a neutral score.
+[Heading1] 17. Alpha Scoring
+Initial v1 score is explainable and deterministic.
+alpha_score =  liquidity_component +  momentum_component +  holder_component +  smart_money_component  - configured_penaltiesEach component returns 0..100 before weighting.Initial weights:liquidity:   0.20momentum:    0.30holder:      0.20smartMoney:  0.30
+Initial score bands:
+--- TABLE ---
+Score | State intent
+0–39 | Ignore
+40–59 | WATCHING
+60–74 | INTERESTING
+75–89 | STRONG_SIGNAL
+90–100 | HIGH CONVICTION / still alert-only in MVP
+--- END TABLE ---
+All weights and thresholds are initial hypotheses, not claimed trading truths.
+[Heading1] 18. Signal State Machine
+NEW | risk PASS/WARNING + minimum discovery requirements vWATCHING | alpha >= interestingThreshold vINTERESTING | alpha >= strongThreshold vSTRONG_SIGNAL | +--> EXPIRED (age limit / inactivity / liquidity collapse / FAIL)Any active state --risk FAIL--> EXPIRED
+[ListBullet] State transitions must be persisted.
+[ListBullet] A token may upgrade but should not downgrade by default in v1 unless a configurable downgrade policy is enabled.
+[ListBullet] Alert deduplication: at most one alert per level per token unless score changes by configured delta or cooldown expires.
+[Heading1] 19. Strategy Configuration
+{  "strategyVersion": "base-meme-v1",  "discovery": {    "minLiquidityUsd": 10000,    "maxTokenAgeMinutes": 360  },  "tracking": {    "inactiveExpiryMinutes": 30  },  "momentum": {    "minVolumeAcceleration": 3.0,    "minUniqueBuyers5m": 20,    "minBuySellRatio": 1.2  },  "smartMoney": {    "minIndependentWallets": 2  },  "scoring": {    "interestingThreshold": 60,    "strongThreshold": 75  }}
+These numeric defaults are starting hypotheses only. Implement validation and support versioned configs.
+[Heading1] 20. Telegram Notification Contract
+🚨 STRONG SIGNALTOKEN: $SYMBOLCA: 0x...Age: 12mMC: $420KLiquidity: $96KScore: 84/100Why:• Smart Money: 3 independent wallets• Volume acceleration: 4.8x• Holder growth: +210 / 5m• Liquidity: stableRisk:⚠ Top 10 concentration: 42%Links:DexScreener | GeckoTerminal | Copy CA
+[ListBullet] Notification must include score breakdown and risk warnings.
+[ListBullet] Failure to send Telegram must not discard the signal; retry with bounded attempts.
+[Heading1] 21. Outcome Tracking
+For every emitted signal, store entry/reference price at signal time and evaluate fixed horizons:
+1m, 5m, 15m, 30m, 1h, 4h, 24h
+--- TABLE ---
+Metric | Formula
+return_pct | (price_horizon - signal_price) / signal_price * 100
+max_runup_pct | maximum observed price between signal and horizon relative to signal price
+max_drawdown_pct | minimum observed price between signal and horizon relative to signal price
+--- END TABLE ---
+[ListBullet] Outcome jobs must use the same durable scheduling approach as snapshots.
+[ListBullet] Historical feature values and strategy version must remain immutable for reproducibility.
+[Heading1] 22. Strategy Evaluation
+[ListBullet] Compare outcomes by score band.
+[ListBullet] Evaluate individual feature contribution and combinations.
+[ListBullet] Metrics: win rate, average return, median return, return distribution, max drawdown, max runup, profit factor where trade rules exist.
+[ListBullet] Do not tune strategy based only on average return; meme-token outcomes may have highly skewed distributions.
+[ListBullet] Any strategy change creates a new strategyVersion.
+[Heading1] 23. Queue and Failure Handling
+[ListBullet] Queues: discovery-analysis, snapshot, risk-analysis, feature-calculation, notification, outcome.
+[ListBullet] Jobs must be idempotent.
+[ListBullet] Retry transient provider failures with exponential backoff and bounded attempts.
+[ListBullet] Permanent invalid-data errors go to failed/audit storage, not infinite retry.
+[ListBullet] Use correlation IDs: candidate/pool ID through the pipeline.
+[ListBullet] Rate-limit external providers centrally.
+[Heading1] 24. Observability
+--- TABLE ---
+Metric | Purpose
+pools_discovered_total | Discovery throughput
+discovery_to_queue_latency | Pipeline latency
+snapshot_success_rate | Data quality
+provider_error_rate | Provider health
+risk_fail_rate | Candidate quality
+signals_total by level | Strategy output
+telegram_failure_rate | Notification health
+job_retry_count | Infrastructure health
+--- END TABLE ---
+[ListBullet] Use structured logs with token, pool, job ID, strategyVersion, and correlation ID.
+[ListBullet] Never log private keys or credentials.
+[Heading1] 25. Security Requirements
+[ListBullet] No private key is needed for MVP alert-only mode.
+[ListBullet] Secrets must be environment variables or a secret manager, never committed.
+[ListBullet] Validate all provider responses.
+[ListBullet] Apply input limits to prevent oversized payload/storage abuse.
+[ListBullet] Rate-limit public API calls.
+[ListBullet] Execution credentials are out of scope until a dedicated execution phase.
+[Heading1] 26. Implementation Phases
+[Heading2] Phase 0 — Foundation
+[ListBullet] Repository, Docker, Postgres, Redis, migrations, config validation, logging, health checks.
+[Heading2] Phase 1 — Discovery
+[ListBullet] Base RPC/WebSocket, Uniswap adapter, Aerodrome adapter, persistence, deduplication, queue.
+[Heading2] Phase 2 — Snapshot Pipeline
+[ListBullet] Market-data provider abstraction, scheduled snapshots, historical persistence.
+[Heading2] Phase 3 — Risk
+[ListBullet] Security provider, deterministic rules, PASS/WARNING/FAIL.
+[Heading2] Phase 4 — Features
+[ListBullet] Liquidity, momentum, holder, clustering, seeded smart wallets.
+[Heading2] Phase 5 — Scoring & Signals
+[ListBullet] Normalization, versioned strategy config, state machine, alert dedupe.
+[Heading2] Phase 6 — Telegram
+[ListBullet] Actionable alerts, retries, audit.
+[Heading2] Phase 7 — Outcome Tracking
+[ListBullet] Horizon jobs, returns, runup, drawdown.
+[Heading2] Phase 8 — Evaluation
+[ListBullet] Queries/reports for score and feature performance.
+[Heading1] 27. Global Acceptance Criteria
+[ListBullet] System can run continuously on a VPS using Docker Compose.
+[ListBullet] New supported pools are persisted exactly once.
+[ListBullet] Every analyzed token has auditable discovery and snapshot history.
+[ListBullet] Risk FAIL prevents alpha alerting.
+[ListBullet] Feature values can be recomputed from stored data.
+[ListBullet] Score output includes component breakdown.
+[ListBullet] Signal transitions are deterministic for the same inputs/config version.
+[ListBullet] Telegram alerts are deduplicated.
+[ListBullet] Every alert has outcome records at configured horizons, unless provider data is unavailable and failure is recorded.
+[ListBullet] Changing a strategy configuration creates a new version and does not mutate historical signal meaning.
+[Heading1] 28. Explicit Non-Requirements
+[ListBullet] Do not implement auto trading in this specification.
+[ListBullet] Do not integrate LLM decision-making into the signal path.
+[ListBullet] Do not claim that any threshold guarantees profitability.
+[ListBullet] Do not build a graph database for MVP.
+[ListBullet] Do not optimize for microsecond latency at the expense of data correctness.
+[ListBullet] Do not add social-media ingestion before the on-chain MVP is stable.
+[Heading1] 29. AI Agent Implementation Instructions
+The coding agent must implement in phases and stop for review after each phase unless explicitly instructed to continue.
+[ListBullet] Read this specification before modifying code.
+[ListBullet] Do not invent additional major architecture components without documenting the reason.
+[ListBullet] Prefer interfaces and dependency injection for providers.
+[ListBullet] Write unit tests for pure feature calculations, scoring, risk decisions, and state transitions.
+[ListBullet] Write integration tests for discovery deduplication, queue idempotency, and snapshot persistence.
+[ListBullet] Use mocks/fixtures for external providers in tests.
+[ListBullet] Do not silently choose production secrets, RPC vendors, or paid APIs.
+[ListBullet] If a required provider contract is unknown, create an adapter interface and a mock implementation rather than coupling the domain logic.
+[ListBullet] At the end of each phase, report changed files, tests run, known limitations, and next acceptance criteria.
+[Heading1] 30. Recommended Initial Agent Prompt
+Use the following instruction together with this specification:
+Implement this project strictly according to the attached Signal Detection Bot Technical Specification v1.0.Work one phase at a time. Start with Phase 0 only.Before coding:1. Inspect the existing repository.2. Compare it against the specification.3. Produce a short implementation plan for Phase 0.4. Implement only Phase 0.5. Run tests/build.6. Report changed files, commands run, acceptance criteria satisfied, and unresolved decisions.Do not implement future phases prematurely.Do not invent auto-trading, social signals, ML, or multi-chain support.When a requirement is ambiguous, prefer a configurable abstraction and clearly document the assumption.
+End of specification.
