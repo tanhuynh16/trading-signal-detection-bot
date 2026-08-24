@@ -11,7 +11,9 @@ import {
   recentSnapshots,
   shouldStopTracking,
 } from '@sdb/snapshot-engine';
+import { evaluateRisk, persistRisk, type RiskRuleConfig } from '@sdb/risk-engine';
 import { isRetryable, withContext, type Logger } from '@sdb/shared';
+import type { GoPlusSecurityProvider } from '@sdb/security';
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES, jobId } from './queues.js';
 
 export type ProcessorDeps = {
@@ -21,9 +23,14 @@ export type ProcessorDeps = {
   queues: Record<string, Queue>;
   quotePrices: QuotePriceResolver;
   logger: Logger;
+  goplus: GoPlusSecurityProvider | null;
   config: {
     minLiquidityUsd: number;
     liquidityGraceMinutes: number;
+    riskRules: RiskRuleConfig;
+    /** Snapshot offsets at which risk is (re-)evaluated. */
+    riskOffsets: readonly string[];
+    riskProbeWei: bigint;
   };
 };
 
@@ -153,6 +160,17 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
         result.created ? 'snapshot captured' : 'snapshot already existed',
       );
 
+      // Spec §14 + late-rug defence: a deployer can enable a tax or blacklist
+      // after launch, so a single T+0 check is trivially defeated. The job ID
+      // includes the offset so each re-check is its own idempotent unit.
+      if (result.created && deps.config.riskOffsets.includes(offset)) {
+        await queues[QUEUE_NAMES.riskAnalysis]!.add(
+          'evaluate',
+          { poolId, offset },
+          { ...DEFAULT_JOB_OPTIONS, jobId: `risk.${poolId}.${offset}` },
+        );
+      }
+
       // §13 early-stop: drop the remaining series for a pool that never became
       // priceable or never reached the liquidity floor.
       const snapshots = await recentSnapshots(deps.db, poolId);
@@ -174,9 +192,61 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
     { connection, concurrency: 4 },
   );
 
+  /**
+   * risk-analysis: gate the token per §14. A FAIL stops all further tracking —
+   * §27 requires that a risk FAIL prevents alpha alerting entirely, and §13
+   * allows early-stopping a token that has failed.
+   */
+  const riskWorker = new Worker(
+    QUEUE_NAMES.riskAnalysis,
+    guarded(deps, QUEUE_NAMES.riskAnalysis, async (job) => {
+      const { poolId, offset } = job.data as { poolId: string; offset: string };
+
+      const evaluation = await evaluateRisk(
+        {
+          db: deps.db,
+          http: deps.http,
+          goplus: deps.goplus,
+          logger: deps.logger,
+          rules: deps.config.riskRules,
+          probeWei: deps.config.riskProbeWei,
+        },
+        poolId,
+      );
+
+      // §21: always an INSERT. The re-checks are separate observations of a
+      // contract whose state can genuinely change between them.
+      await persistRisk(deps.db, evaluation);
+
+      const log = withContext(logger, { correlationId: poolId, poolId });
+      log.info(
+        {
+          offset,
+          status: evaluation.result.status,
+          riskScore: evaluation.result.riskScore,
+          flags: evaluation.result.flags.map((f) => f.code),
+          canBuy: evaluation.simulation?.canBuy,
+          canSell: evaluation.simulation?.canSell,
+          tokenTax: evaluation.simulation?.tokenTaxFraction,
+        },
+        'risk evaluated',
+      );
+
+      if (evaluation.result.status === 'FAIL') {
+        const removed = await removePendingSnapshots(snapshotQueue, poolId);
+        log.warn(
+          { removed, flags: evaluation.result.flags.map((f) => f.code) },
+          'risk FAIL: tracking stopped, no alerting possible for this token',
+        );
+      }
+    }),
+    { connection, concurrency: 2 },
+  );
+
   for (const [worker, name] of [
     [discoveryWorker, QUEUE_NAMES.discoveryAnalysis],
     [snapshotWorker, QUEUE_NAMES.snapshot],
+    [riskWorker, QUEUE_NAMES.riskAnalysis],
   ] as const) {
     worker.on('failed', (job, error) => {
       logger.error(
@@ -186,7 +256,7 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
     });
   }
 
-  return [discoveryWorker, snapshotWorker];
+  return [discoveryWorker, snapshotWorker, riskWorker];
 }
 
 /** Cancel a pool's not-yet-due snapshot jobs. */

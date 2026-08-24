@@ -20,7 +20,13 @@
       "path": "packages/providers/market-data"
     },
     {
+      "path": "packages/providers/security"
+    },
+    {
       "path": "packages/discovery"
+    },
+    {
+      "path": "packages/risk-engine"
     },
     {
       "path": "packages/snapshot-engine"

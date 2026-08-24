@@ -5,6 +5,8 @@ import { createDatabase } from '@sdb/database';
 import { assertChainId, createChainClients } from '@sdb/blockchain';
 import { DiscoveryRunner } from '@sdb/discovery';
 import { QuotePriceResolver } from '@sdb/market-data';
+import { GoPlusSecurityProvider } from '@sdb/security';
+import { DEFAULT_RULE_CONFIG } from '@sdb/risk-engine';
 import { SwapTail } from '@sdb/snapshot-engine';
 import { startProcessors } from './processors.js';
 import { bootstrap, createLogger, registerSecret } from '@sdb/shared';
@@ -78,6 +80,17 @@ const swapTail = new SwapTail({
   },
 });
 
+// Enrichment only. Measured: GoPlus returns 10 of 39 fields for a token one
+// minute old, with every critical field absent, and unchanged six minutes
+// later. The simulator owns the critical verdict; this fills the rest.
+const goplus = env.GOPLUS_ENABLED
+  ? new GoPlusSecurityProvider({
+      baseUrl: env.GOPLUS_BASE_URL,
+      chainId: env.BASE_CHAIN_ID,
+      timeoutMs: env.GOPLUS_TIMEOUT_MS,
+    })
+  : null;
+
 const workers = startProcessors({
   db,
   http: chain.http,
@@ -85,9 +98,23 @@ const workers = startProcessors({
   queues,
   quotePrices,
   logger,
+  goplus,
   config: {
     minLiquidityUsd: strategy.discovery.minLiquidityUsd,
     liquidityGraceMinutes: env.LIQUIDITY_GRACE_MINUTES,
+    // Strategy config overrides the §14.1 defaults, so a change to the table
+    // mints a new strategyVersion rather than silently reinterpreting history.
+    riskRules: {
+      ...DEFAULT_RULE_CONFIG,
+      actions: { ...DEFAULT_RULE_CONFIG.actions, ...strategy.risk.actions },
+      severities: { ...DEFAULT_RULE_CONFIG.severities, ...strategy.risk.severities },
+      maxTokenTaxFraction: strategy.risk.maxTokenTaxFraction,
+      warnTokenTaxFraction: strategy.risk.warnTokenTaxFraction,
+      warnTop10ConcentrationPercent: strategy.risk.warnTop10ConcentrationPercent,
+      failTop10ConcentrationPercent: strategy.risk.failTop10ConcentrationPercent,
+    },
+    riskOffsets: strategy.risk.evaluateAtOffsets,
+    riskProbeWei: BigInt(env.RISK_PROBE_WEI),
   },
 });
 

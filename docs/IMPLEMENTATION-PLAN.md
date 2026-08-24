@@ -12,7 +12,7 @@ gap resolutions below by their G-numbers.
 | 0 | Foundation: workspace, Docker, schema, config, logging, health | **done** |
 | 1 | Discovery: Uniswap V2/V3 + Aerodrome, dedupe, queueing | **done** |
 | 2 | Snapshot pipeline | **done** |
-| 3 | Risk engine | not started |
+| 3 | Risk engine | **done** |
 | 4a | Features: liquidity, momentum | not started |
 | 4b | Features: holders, clustering, smart money | not started |
 | R | Replay/backfill harness (cross-cutting, alongside Phase 4) | not started |
@@ -185,7 +185,7 @@ Trade capture uses one global tail rather than per-snapshot fetches
 ([ADR 0008](adr/0008-global-swap-tail.md)); liquidity is judged over a grace
 period rather than at T+0 ([ADR 0009](adr/0009-liquidity-grace-period.md)).
 
-### Phase 3 — Risk engine (§14)
+### Phase 3 — Risk engine (§14) ✅
 `SecurityProvider` interface with a mock first (§29), then one real adapter —
 **selection confirmed before wiring, per §29's prohibition on silently choosing
 paid APIs**. Independent on-chain buy/sell simulation via `eth_call` state
@@ -193,8 +193,25 @@ override as a second honeypot check. Deterministic rule table from §14.1, every
 severity and action config-driven, raw provider response retained. Risk gates;
 it never contributes positive alpha.
 
-*Accepted when:* rules are pure functions with per-flag tests; FAIL blocks all
-downstream alerting; raw responses are stored.
+*Accepted:* verified live — 30 evaluations, verdicts spread across PASS and
+WARNING, raw provider responses retained on every row, and re-checks appending
+rather than overwriting (§21).
+
+Own buy/sell simulation is the primary source
+([ADR 0010](adr/0010-simulation-first-risk.md)), calibrated against a measured
+clean baseline of 99.40% round-trip retention on Uniswap V2. Tax is computed net
+of the pool's own fee, so a clean token in a 1% V3 tier is not reported as
+2%-taxed.
+
+Undetermined risk warns rather than passing
+([ADR 0011](adr/0011-unknown-risk-is-not-safe.md)); provider coverage is checked
+per field, because a response carrying some critical fields while omitting
+others was silently reading as clean.
+
+Risk is evaluated at T+0 and re-checked at 5m and 30m — a deployer can enable a
+tax or blacklist after launch, so a single T+0 check is trivially defeated. A
+FAIL cancels pending snapshots and stops tracking, satisfying §27's requirement
+that a risk FAIL prevents alerting.
 
 ### Phase 4a — Liquidity and momentum features (§15.1–15.2)
 Pure functions over snapshots and trades. Null on insufficient history, never 0

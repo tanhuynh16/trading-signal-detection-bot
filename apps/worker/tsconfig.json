@@ -34,6 +34,12 @@
     },
     {
       "path": "../../packages/snapshot-engine"
+    },
+    {
+      "path": "../../packages/providers/security"
+    },
+    {
+      "path": "../../packages/risk-engine"
     }
   ]
 }

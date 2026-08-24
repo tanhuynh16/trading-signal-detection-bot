@@ -72,6 +72,16 @@ const envSchema = z.object({
     .transform((v) => v.toLowerCase()),
   QUOTE_PRICE_TTL_MS: z.coerce.number().int().positive().default(15_000),
 
+  // GoPlus is enrichment only: it does not index tokens inside our operating
+  // window, so it can never supply a critical verdict. Keyless and free.
+  GOPLUS_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  GOPLUS_BASE_URL: z.string().url().default('https://api.gopluslabs.io'),
+  GOPLUS_TIMEOUT_MS: z.coerce.number().int().positive().default(8_000),
+
+  // ETH probe size for the honeypot simulation. Small enough not to move a
+  // thin pool, large enough to clear minimum-output rounding.
+  RISK_PROBE_WEI: z.string().regex(/^\d+$/).default('10000000000000000'),
+
   // How long a pool may sit below the liquidity floor before we stop tracking.
   // Pools are often created empty and funded minutes later, so a T+0-only
   // check would discard exactly the launches worth watching.

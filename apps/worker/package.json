@@ -19,6 +19,8 @@
     "@sdb/discovery": "workspace:*",
     "@sdb/market-data": "workspace:*",
     "@sdb/snapshot-engine": "workspace:*",
-    "viem": "^2.22.4"
+    "viem": "^2.22.4",
+    "@sdb/risk-engine": "workspace:*",
+    "@sdb/security": "workspace:*"
   }
 }

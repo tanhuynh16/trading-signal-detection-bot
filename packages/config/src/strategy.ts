@@ -39,6 +39,24 @@ export const strategyConfigSchema = z.object({
     excludedAddresses: z.array(z.string().regex(/^0x[0-9a-f]{40}$/)).default([]),
   }),
 
+  /**
+   * Spec §14.1: the exact interpretation of each flag must be configurable.
+   * Kept in strategy config (not env) so a change mints a new strategyVersion
+   * and historical verdicts keep their original meaning (§22).
+   */
+  risk: z
+    .object({
+      actions: z.record(z.string(), z.enum(['FAIL', 'WARNING', 'IGNORE'])).default({}),
+      severities: z.record(z.string(), z.enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])).default({}),
+      maxTokenTaxFraction: z.number().min(0).max(1).default(0.25),
+      warnTokenTaxFraction: z.number().min(0).max(1).default(0.1),
+      warnTop10ConcentrationPercent: z.number().min(0).max(100).default(40),
+      failTop10ConcentrationPercent: z.number().min(0).max(100).nullable().default(null),
+      /** Offsets at which risk is re-evaluated (§14 + late-rug defence). */
+      evaluateAtOffsets: z.array(z.string()).default(['T0', '5m', '30m']),
+    })
+    .default({}),
+
   scoring: z.object({
     interestingThreshold: z.number().min(0).max(100),
     strongThreshold: z.number().min(0).max(100),
@@ -104,6 +122,15 @@ export const BASE_MEME_V1: StrategyConfig = parseStrategyConfig({
   tracking: { inactiveExpiryMinutes: 30, poolUnavailableExpiryMinutes: 10 },
   momentum: { minVolumeAcceleration: 3.0, minUniqueBuyers5m: 20, minBuySellRatio: 1.2 },
   smartMoney: { minIndependentWallets: 2 },
+  risk: {
+    actions: {},
+    severities: {},
+    maxTokenTaxFraction: 0.25,
+    warnTokenTaxFraction: 0.1,
+    warnTop10ConcentrationPercent: 40,
+    failTop10ConcentrationPercent: null,
+    evaluateAtOffsets: ['T0', '5m', '30m'],
+  },
   holders: { dustThresholdUsd: 1, excludedAddresses: [] },
   scoring: {
     interestingThreshold: 60,

@@ -74,6 +74,12 @@ importers:
       '@sdb/market-data':
         specifier: workspace:*
         version: link:../../packages/providers/market-data
+      '@sdb/risk-engine':
+        specifier: workspace:*
+        version: link:../../packages/risk-engine
+      '@sdb/security':
+        specifier: workspace:*
+        version: link:../../packages/providers/security
       '@sdb/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -174,6 +180,45 @@ importers:
       '@sdb/shared':
         specifier: workspace:*
         version: link:../../shared
+      viem:
+        specifier: ^2.22.4
+        version: 2.55.19(typescript@5.9.3)(zod@3.25.76)
+
+  packages/providers/security:
+    dependencies:
+      '@sdb/domain':
+        specifier: workspace:*
+        version: link:../../domain
+      '@sdb/shared':
+        specifier: workspace:*
+        version: link:../../shared
+      viem:
+        specifier: ^2.22.4
+        version: 2.55.19(typescript@5.9.3)(zod@3.25.76)
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+
+  packages/risk-engine:
+    dependencies:
+      '@sdb/config':
+        specifier: workspace:*
+        version: link:../config
+      '@sdb/database':
+        specifier: workspace:*
+        version: link:../database
+      '@sdb/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@sdb/security':
+        specifier: workspace:*
+        version: link:../providers/security
+      '@sdb/shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: ^0.38.3
+        version: 0.38.4(postgres@3.4.9)
       viem:
         specifier: ^2.22.4
         version: 2.55.19(typescript@5.9.3)(zod@3.25.76)

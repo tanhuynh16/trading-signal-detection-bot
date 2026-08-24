@@ -20,7 +20,7 @@ repository deviates, the reason is in [`docs/adr/`](docs/adr/).
 | 0     | Foundation: workspace, Docker, schema, config, logging, health   | **done**    |
 | 1     | Discovery: Uniswap V2/V3 + Aerodrome, dedupe, queueing           | **done**    |
 | 2     | Snapshot pipeline                                                | **done**    |
-| 3     | Risk engine                                                      | not started |
+| 3     | Risk engine                                                      | **done**    |
 | 4     | Features (liquidity, momentum, holders, clustering, smart money) | not started |
 | 5     | Normalization, scoring, signal state machine                     | not started |
 | 6     | Telegram                                                         | not started |
