@@ -26,10 +26,16 @@
       "path": "packages/discovery"
     },
     {
+      "path": "packages/holder-index"
+    },
+    {
       "path": "packages/risk-engine"
     },
     {
       "path": "packages/snapshot-engine"
+    },
+    {
+      "path": "packages/feature-engine"
     },
     {
       "path": "apps/api"

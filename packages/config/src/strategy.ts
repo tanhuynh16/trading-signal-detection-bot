@@ -30,11 +30,22 @@ export const strategyConfigSchema = z.object({
 
   smartMoney: z.object({
     minIndependentWallets: z.number().int().nonnegative(),
+    /**
+     * §15.5: MVP uses a manually seeded wallet list. Empty by default — the
+     * smart-money features then report null, which G1's coverage
+     * renormalisation handles correctly rather than scoring the component 0.
+     */
+    seedWallets: z.array(z.string().regex(/^0x[0-9a-f]{40}$/)).default([]),
   }),
 
   holders: z.object({
     /** Spec §15.3: the dust threshold must be configuration-driven. */
     dustThresholdUsd: z.number().nonnegative().default(1),
+    /**
+     * Dust in RAW token units. Preferred over the USD threshold because it
+     * needs no price — a token with no USD path still has holders.
+     */
+    dustThresholdRaw: z.string().regex(/^\d+$/).default('0'),
     /** Excluded from top10_concentration: LP contracts, burn sinks (§15.3). */
     excludedAddresses: z.array(z.string().regex(/^0x[0-9a-f]{40}$/)).default([]),
   }),
@@ -54,6 +65,15 @@ export const strategyConfigSchema = z.object({
       failTop10ConcentrationPercent: z.number().min(0).max(100).nullable().default(null),
       /** Offsets at which risk is re-evaluated (§14 + late-rug defence). */
       evaluateAtOffsets: z.array(z.string()).default(['T0', '5m', '30m']),
+    })
+    .default({}),
+
+  /** §15.4 clustering tolerances. Deterministic heuristics only (§28). */
+  clustering: z
+    .object({
+      timeProximityMs: z.number().int().positive().default(300_000),
+      amountTolerance: z.number().min(0).max(1).default(0.05),
+      minClusterSize: z.number().int().min(2).default(2),
     })
     .default({}),
 
@@ -121,7 +141,8 @@ export const BASE_MEME_V1: StrategyConfig = parseStrategyConfig({
   discovery: { minLiquidityUsd: 10000, maxTokenAgeMinutes: 360 },
   tracking: { inactiveExpiryMinutes: 30, poolUnavailableExpiryMinutes: 10 },
   momentum: { minVolumeAcceleration: 3.0, minUniqueBuyers5m: 20, minBuySellRatio: 1.2 },
-  smartMoney: { minIndependentWallets: 2 },
+  smartMoney: { minIndependentWallets: 2, seedWallets: [] },
+  clustering: { timeProximityMs: 300_000, amountTolerance: 0.05, minClusterSize: 2 },
   risk: {
     actions: {},
     severities: {},
@@ -131,7 +152,7 @@ export const BASE_MEME_V1: StrategyConfig = parseStrategyConfig({
     failTop10ConcentrationPercent: null,
     evaluateAtOffsets: ['T0', '5m', '30m'],
   },
-  holders: { dustThresholdUsd: 1, excludedAddresses: [] },
+  holders: { dustThresholdUsd: 1, dustThresholdRaw: '0', excludedAddresses: [] },
   scoring: {
     interestingThreshold: 60,
     strongThreshold: 75,

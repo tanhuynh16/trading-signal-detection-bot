@@ -40,6 +40,12 @@
     },
     {
       "path": "../../packages/risk-engine"
+    },
+    {
+      "path": "../../packages/feature-engine"
+    },
+    {
+      "path": "../../packages/holder-index"
     }
   ]
 }

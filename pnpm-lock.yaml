@@ -71,6 +71,12 @@ importers:
       '@sdb/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@sdb/feature-engine':
+        specifier: workspace:*
+        version: link:../../packages/feature-engine
+      '@sdb/holder-index':
+        specifier: workspace:*
+        version: link:../../packages/holder-index
       '@sdb/market-data':
         specifier: workspace:*
         version: link:../../packages/providers/market-data
@@ -156,6 +162,48 @@ importers:
       '@sdb/shared':
         specifier: workspace:*
         version: link:../shared
+
+  packages/feature-engine:
+    dependencies:
+      '@sdb/database':
+        specifier: workspace:*
+        version: link:../database
+      '@sdb/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@sdb/shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: ^0.38.3
+        version: 0.38.4(postgres@3.4.9)
+      viem:
+        specifier: ^2.22.4
+        version: 2.55.19(typescript@5.9.3)(zod@3.25.76)
+
+  packages/holder-index:
+    dependencies:
+      '@sdb/blockchain':
+        specifier: workspace:*
+        version: link:../providers/blockchain
+      '@sdb/database':
+        specifier: workspace:*
+        version: link:../database
+      '@sdb/discovery':
+        specifier: workspace:*
+        version: link:../discovery
+      '@sdb/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@sdb/shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: ^0.38.3
+        version: 0.38.4(postgres@3.4.9)
+      viem:
+        specifier: ^2.22.4
+        version: 2.55.19(typescript@5.9.3)(zod@3.25.76)
 
   packages/providers/blockchain:
     dependencies:

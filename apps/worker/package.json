@@ -21,6 +21,8 @@
     "@sdb/snapshot-engine": "workspace:*",
     "viem": "^2.22.4",
     "@sdb/risk-engine": "workspace:*",
-    "@sdb/security": "workspace:*"
+    "@sdb/security": "workspace:*",
+    "@sdb/feature-engine": "workspace:*",
+    "@sdb/holder-index": "workspace:*"
   }
 }

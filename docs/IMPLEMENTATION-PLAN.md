@@ -13,8 +13,8 @@ gap resolutions below by their G-numbers.
 | 1 | Discovery: Uniswap V2/V3 + Aerodrome, dedupe, queueing | **done** |
 | 2 | Snapshot pipeline | **done** |
 | 3 | Risk engine | **done** |
-| 4a | Features: liquidity, momentum | not started |
-| 4b | Features: holders, clustering, smart money | not started |
+| 4a | Features: liquidity, momentum | **done** |
+| 4b | Features: holders, clustering, smart money | **done** |
 | R | Replay/backfill harness (cross-cutting, alongside Phase 4) | not started |
 | 5 | Normalization, scoring, signal state machine | not started |
 | 6 | Telegram | not started |
@@ -213,12 +213,12 @@ tax or blacklist after launch, so a single T+0 check is trivially defeated. A
 FAIL cancels pending snapshots and stops tracking, satisfying §27's requirement
 that a risk FAIL prevents alerting.
 
-### Phase 4a — Liquidity and momentum features (§15.1–15.2)
+### Phase 4a — Liquidity and momentum features (§15.1–15.2) ✅
 Pure functions over snapshots and trades. Null on insufficient history, never 0
 (§15). `volume_acceleration_5m` requires three prior comparable windows or
 returns null.
 
-### Phase 4b — Holders, clustering, smart money (§15.3–15.5)
+### Phase 4b — Holders, clustering, smart money (§15.3–15.5) ✅
 `packages/holder-index` replays `Transfer` logs for tracked tokens into a balance
 table; configured LP/burn addresses excluded from `top10_concentration`; dust
 threshold from config. Clustering uses deterministic heuristics only —

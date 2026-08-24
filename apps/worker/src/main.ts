@@ -8,6 +8,7 @@ import { QuotePriceResolver } from '@sdb/market-data';
 import { GoPlusSecurityProvider } from '@sdb/security';
 import { DEFAULT_RULE_CONFIG } from '@sdb/risk-engine';
 import { SwapTail } from '@sdb/snapshot-engine';
+import { TransferTail } from '@sdb/holder-index';
 import { startProcessors } from './processors.js';
 import { bootstrap, createLogger, registerSecret } from '@sdb/shared';
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES, jobId } from './queues.js';
@@ -91,6 +92,20 @@ const goplus = env.GOPLUS_ENABLED
     })
   : null;
 
+// Third consumer of the cursor-driven tail pattern. ADR 0005: holder features
+// have no other reproducible source — there is no "list holders" RPC.
+const transferTail = new TransferTail({
+  db,
+  http: chain.http,
+  logger,
+  config: {
+    chainId: env.BASE_CHAIN_ID,
+    logChunkBlocks: env.DISCOVERY_LOG_CHUNK_BLOCKS,
+    maxTokenAgeMinutes: strategy.discovery.maxTokenAgeMinutes,
+    maxAddressesPerQuery: env.SWAP_TAIL_MAX_ADDRESSES,
+  },
+});
+
 const workers = startProcessors({
   db,
   http: chain.http,
@@ -115,6 +130,28 @@ const workers = startProcessors({
     },
     riskOffsets: strategy.risk.evaluateAtOffsets,
     riskProbeWei: BigInt(env.RISK_PROBE_WEI),
+    features: {
+      holders: {
+        dustThresholdRaw: BigInt(strategy.holders.dustThresholdRaw),
+        // The pool itself is the largest holder of every new token; leaving it
+        // in makes top10_concentration read ~100% for all of them (§15.3).
+        excludedAddresses: new Set(strategy.holders.excludedAddresses),
+      },
+      sampleToleranceMs: env.FEATURE_SAMPLE_TOLERANCE_MS,
+      seedWallets: new Set(strategy.smartMoney.seedWallets),
+      smartWalletScores: new Map(),
+      chainId: env.BASE_CHAIN_ID,
+      funding: env.CLUSTERING_ENABLED
+        ? {
+            maxWallets: env.CLUSTER_MAX_WALLETS,
+            cluster: {
+              timeProximityMs: strategy.clustering.timeProximityMs,
+              amountTolerance: strategy.clustering.amountTolerance,
+              minClusterSize: strategy.clustering.minClusterSize,
+            },
+          }
+        : null,
+    },
   },
 });
 
@@ -170,6 +207,7 @@ let tailFirstDrain = true;
 discovery.onDrained(async (head) => {
   try {
     await swapTail.drain(head, tailFirstDrain);
+    await transferTail.drain(head, tailFirstDrain);
     tailFirstDrain = false;
   } catch (error) {
     logger.error(

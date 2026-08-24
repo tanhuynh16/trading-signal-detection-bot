@@ -12,6 +12,12 @@ import {
   shouldStopTracking,
 } from '@sdb/snapshot-engine';
 import { evaluateRisk, persistRisk, type RiskRuleConfig } from '@sdb/risk-engine';
+import {
+  calculateFeatures,
+  coverage,
+  persistFeatures,
+  type FeatureConfig,
+} from '@sdb/feature-engine';
 import { isRetryable, withContext, type Logger } from '@sdb/shared';
 import type { GoPlusSecurityProvider } from '@sdb/security';
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES, jobId } from './queues.js';
@@ -31,6 +37,7 @@ export type ProcessorDeps = {
     /** Snapshot offsets at which risk is (re-)evaluated. */
     riskOffsets: readonly string[];
     riskProbeWei: bigint;
+    features: FeatureConfig;
   };
 };
 
@@ -160,6 +167,16 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
         result.created ? 'snapshot captured' : 'snapshot already existed',
       );
 
+      // Features are recomputed after every snapshot: each new observation
+      // extends the liquidity series and the trade windows §15 measures over.
+      if (result.created) {
+        await queues[QUEUE_NAMES.featureCalculation]!.add(
+          'calculate',
+          { poolId, offset },
+          { ...DEFAULT_JOB_OPTIONS, jobId: jobId.featureCalculation(poolId, offset) },
+        );
+      }
+
       // Spec §14 + late-rug defence: a deployer can enable a tax or blacklist
       // after launch, so a single T+0 check is trivially defeated. The job ID
       // includes the offset so each re-check is its own idempotent unit.
@@ -243,10 +260,47 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
     { connection, concurrency: 2 },
   );
 
+  /**
+   * feature-calculation: compute the §15 feature set from stored snapshots,
+   * trades and holder balances. Pure computation over Postgres — no RPC.
+   */
+  const featureWorker = new Worker(
+    QUEUE_NAMES.featureCalculation,
+    guarded(deps, QUEUE_NAMES.featureCalculation, async (job) => {
+      const { poolId, offset } = job.data as { poolId: string; offset: string };
+
+      const features = await calculateFeatures(
+        { db: deps.db, logger: deps.logger, config: deps.config.features, http: deps.http },
+        poolId,
+        offset,
+      );
+      if (!features) return; // pool vanished; nothing to compute
+
+      await persistFeatures(deps.db, features);
+
+      const { measured, total } = coverage(features.values);
+      withContext(logger, { correlationId: poolId, poolId }).info(
+        {
+          offset,
+          measured,
+          total,
+          liquidityUsd: features.values['liquidity_usd'],
+          buySellRatio: features.values['buy_sell_ratio'],
+          volumeAcceleration: features.values['volume_acceleration_5m'],
+          holderCount: features.values['holder_count'],
+          clusterConcentration: features.values['cluster_concentration'],
+        },
+        'features calculated',
+      );
+    }),
+    { connection, concurrency: 4 },
+  );
+
   for (const [worker, name] of [
     [discoveryWorker, QUEUE_NAMES.discoveryAnalysis],
     [snapshotWorker, QUEUE_NAMES.snapshot],
     [riskWorker, QUEUE_NAMES.riskAnalysis],
+    [featureWorker, QUEUE_NAMES.featureCalculation],
   ] as const) {
     worker.on('failed', (job, error) => {
       logger.error(
@@ -256,7 +310,7 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
     });
   }
 
-  return [discoveryWorker, snapshotWorker, riskWorker];
+  return [discoveryWorker, snapshotWorker, riskWorker, featureWorker];
 }
 
 /** Cancel a pool's not-yet-due snapshot jobs. */

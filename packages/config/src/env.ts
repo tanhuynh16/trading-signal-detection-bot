@@ -90,6 +90,15 @@ const envSchema = z.object({
   // Addresses per eth_getLogs call in the swap tail; the list is batched to fit.
   SWAP_TAIL_MAX_ADDRESSES: z.coerce.number().int().positive().default(100),
 
+  // Snapshots land on the §13 schedule, not on exact feature boundaries, so
+  // "liquidity 5m ago" resolves to the nearest observation within this window.
+  FEATURE_SAMPLE_TOLERANCE_MS: z.coerce.number().int().positive().default(120_000),
+
+  // §15.4 clustering. One getAssetTransfers per wallet, but a wallet's first
+  // funding is immutable so each is looked up once ever and cached.
+  CLUSTERING_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  CLUSTER_MAX_WALLETS: z.coerce.number().int().positive().default(50),
+
   // Aerodrome stable pools pair correlated assets; new meme tokens land in
   // volatile pools. Off by default, configurable per §3.
   AERODROME_INCLUDE_STABLE: z
