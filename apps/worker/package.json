@@ -16,6 +16,9 @@
     "bullmq": "^5.34.10",
     "ioredis": "^5.4.2",
     "@sdb/blockchain": "workspace:*",
-    "@sdb/discovery": "workspace:*"
+    "@sdb/discovery": "workspace:*",
+    "@sdb/market-data": "workspace:*",
+    "@sdb/snapshot-engine": "workspace:*",
+    "viem": "^2.22.4"
   }
 }

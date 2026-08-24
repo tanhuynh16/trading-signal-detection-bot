@@ -28,6 +28,12 @@
     },
     {
       "path": "../../packages/discovery"
+    },
+    {
+      "path": "../../packages/providers/market-data"
+    },
+    {
+      "path": "../../packages/snapshot-engine"
     }
   ]
 }

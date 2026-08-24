@@ -4,6 +4,9 @@ import { loadEnv, getStrategyConfig } from '@sdb/config';
 import { createDatabase } from '@sdb/database';
 import { assertChainId, createChainClients } from '@sdb/blockchain';
 import { DiscoveryRunner } from '@sdb/discovery';
+import { QuotePriceResolver } from '@sdb/market-data';
+import { SwapTail } from '@sdb/snapshot-engine';
+import { startProcessors } from './processors.js';
 import { bootstrap, createLogger, registerSecret } from '@sdb/shared';
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES, jobId } from './queues.js';
 
@@ -47,6 +50,47 @@ await bootstrapAsync('RPC endpoint is not Base', () => assertChainId(chain.http)
 
 const discoveryQueue = queues[QUEUE_NAMES.discoveryAnalysis]!;
 
+// USDC and DAI on Base carry different decimals (6 vs 18); the resolver is told
+// explicitly rather than assuming, since a wrong value shifts USD by 10^12.
+const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+const DAI = '0x50c5725949a6f0c72e6c4a641f24049a917db0cb';
+const WETH = '0x4200000000000000000000000000000000000006';
+
+const quotePrices = new QuotePriceResolver(chain.http, {
+  stablecoins: [USDC, DAI],
+  decimals: { [USDC]: 6, [DAI]: 18, [WETH]: 18 },
+  weth: WETH,
+  referencePool: env.WETH_USD_REFERENCE_POOL as `0x${string}`,
+  ttlMs: env.QUOTE_PRICE_TTL_MS,
+});
+
+// One global tail ingests Swap logs for every tracked pool in a single query
+// per block window, so snapshots read trades from Postgres at zero RPC cost.
+const swapTail = new SwapTail({
+  db,
+  http: chain.http,
+  logger,
+  config: {
+    chainId: env.BASE_CHAIN_ID,
+    logChunkBlocks: env.DISCOVERY_LOG_CHUNK_BLOCKS,
+    maxTokenAgeMinutes: strategy.discovery.maxTokenAgeMinutes,
+    maxAddressesPerQuery: env.SWAP_TAIL_MAX_ADDRESSES,
+  },
+});
+
+const workers = startProcessors({
+  db,
+  http: chain.http,
+  connection,
+  queues,
+  quotePrices,
+  logger,
+  config: {
+    minLiquidityUsd: strategy.discovery.minLiquidityUsd,
+    liquidityGraceMinutes: env.LIQUIDITY_GRACE_MINUTES,
+  },
+});
+
 const discovery = new DiscoveryRunner({
   db,
   http: chain.http,
@@ -76,6 +120,7 @@ const discovery = new DiscoveryRunner({
 async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, 'shutting down worker');
   await discovery.stop();
+  await Promise.all(workers.map((worker) => worker.close()));
   await Promise.all(Object.values(queues).map((queue) => queue.close()));
   await chain.close().catch(() => {});
   await connection.quit().catch(() => connection.disconnect());
@@ -92,11 +137,30 @@ process.on('unhandledRejection', (reason) => {
   logger.error({ err: reason }, 'unhandled rejection');
 });
 
+// The tail rides the same head notifications as discovery: one drain pass
+// keeps both the cursor and the trade log moving without extra polling.
+let tailFirstDrain = true;
+discovery.onDrained(async (head) => {
+  try {
+    await swapTail.drain(head, tailFirstDrain);
+    tailFirstDrain = false;
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error) },
+      'swap tail drain failed; discovery continues',
+    );
+  }
+});
+
 await discovery.start();
 
 logger.info(
-  { strategyVersion: strategy.strategyVersion, queues: Object.keys(queues) },
-  'worker started; discovery active (phase 1)',
+  {
+    strategyVersion: strategy.strategyVersion,
+    queues: Object.keys(queues),
+    processors: workers.length,
+  },
+  'worker started; discovery + snapshot pipeline active (phase 2)',
 );
 
 /** Async twin of `bootstrap()` for startup steps that hit the network. */

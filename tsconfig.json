@@ -17,7 +17,13 @@
       "path": "packages/providers/blockchain"
     },
     {
+      "path": "packages/providers/market-data"
+    },
+    {
       "path": "packages/discovery"
+    },
+    {
+      "path": "packages/snapshot-engine"
     },
     {
       "path": "apps/api"

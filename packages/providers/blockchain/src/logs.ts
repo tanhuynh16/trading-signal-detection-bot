@@ -1,4 +1,4 @@
-import type { AbiEvent, Address, Log, PublicClient } from 'viem';
+import type { AbiEvent, Address, Hex, Log, PublicClient } from 'viem';
 import { TransientProviderError } from '@sdb/shared';
 
 export type LogRange = { fromBlock: bigint; toBlock: bigint };
@@ -77,9 +77,23 @@ export function chunkRange(from: bigint, to: bigint, size: number): LogRange[] {
  * cursor per chunk, so out-of-order completion would let a later chunk commit
  * over an earlier failure and open a gap.
  */
+/**
+ * Either a single event (typed, decoded by viem) or raw topic filters.
+ *
+ * The swap tail needs the raw form: it queries an ARRAY of addresses against an
+ * OR of three different Swap selectors in one call, which viem's typed `event`
+ * parameter cannot express.
+ */
+export type LogFilter =
+  | { event: AbiEvent; topics?: undefined }
+  | { topics: (Hex | Hex[] | null)[]; event?: undefined };
+
 export async function fetchLogsChunked(
   client: PublicClient,
-  params: { address: Address; event: AbiEvent; fromBlock: bigint; toBlock: bigint },
+  params: { address: Address | readonly Address[] } & LogFilter & {
+      fromBlock: bigint;
+      toBlock: bigint;
+    },
   options: LogFetcherOptions & { chunkSize?: AdaptiveChunkSize },
   onChunk: (logs: Log[], range: LogRange) => Promise<void>,
 ): Promise<void> {
@@ -98,12 +112,17 @@ export async function fetchLogsChunked(
 
     let logs: Log[];
     try {
+      // viem's getLogs overloads do not cover "address array + raw OR topics",
+      // so the filter is assembled untyped and narrowed by LogFilter above.
+      const filter = params.event
+        ? { event: params.event }
+        : { topics: params.topics };
       logs = await client.getLogs({
-        address: params.address,
-        event: params.event,
+        address: params.address as Address,
+        ...filter,
         fromBlock: range.fromBlock,
         toBlock: range.toBlock,
-      });
+      } as Parameters<PublicClient['getLogs']>[0]);
     } catch (error) {
       if (isRangeError(error) && sizing.canShrink()) {
         const before = sizing.value;

@@ -63,6 +63,23 @@ const envSchema = z.object({
   // one eth_getLogs per factory and exhausts rate-limited plans.
   DISCOVERY_MIN_DRAIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(5_000),
 
+  // Deep WETH/USDC pool used as the on-chain ETH/USD oracle (ADR 0002).
+  // Derived from the Uniswap V3 factory, not hardcoded from memory.
+  WETH_USD_REFERENCE_POOL: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{40}$/)
+    .default('0x6c561b446416e1a00e8e93e221854d6ea4171372')
+    .transform((v) => v.toLowerCase()),
+  QUOTE_PRICE_TTL_MS: z.coerce.number().int().positive().default(15_000),
+
+  // How long a pool may sit below the liquidity floor before we stop tracking.
+  // Pools are often created empty and funded minutes later, so a T+0-only
+  // check would discard exactly the launches worth watching.
+  LIQUIDITY_GRACE_MINUTES: z.coerce.number().positive().default(5),
+
+  // Addresses per eth_getLogs call in the swap tail; the list is batched to fit.
+  SWAP_TAIL_MAX_ADDRESSES: z.coerce.number().int().positive().default(100),
+
   // Aerodrome stable pools pair correlated assets; new meme tokens land in
   // volatile pools. Off by default, configurable per §3.
   AERODROME_INCLUDE_STABLE: z

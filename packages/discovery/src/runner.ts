@@ -80,7 +80,7 @@ export async function drainFactory(
     http,
     {
       address: factory.address,
-      event: factory.event as Parameters<typeof fetchLogsChunked>[1]['event'],
+      event: factory.event,
       fromBlock: plan.fromBlock,
       toBlock: plan.toBlock,
     },
@@ -182,8 +182,18 @@ export class DiscoveryRunner {
   private readonly drained = new Set<string>();
   private lastDrainAt = 0;
   private pendingHead: bigint | null = null;
+  /**
+   * Callbacks run after each drain pass, given the head that pass used.
+   * The swap tail rides this rather than polling for its own head — one
+   * eth_blockNumber serves both, which matters on a rate-limited plan.
+   */
+  private readonly afterDrain: Array<(head: bigint) => Promise<void>> = [];
 
   constructor(private readonly deps: DiscoveryDeps) {}
+
+  onDrained(callback: (head: bigint) => Promise<void>): void {
+    this.afterDrain.push(callback);
+  }
 
   private sizerFor(source: string): AdaptiveChunkSize {
     let sizer = this.chunkSizes.get(source);
@@ -276,6 +286,19 @@ export class DiscoveryRunner {
             'factory drain failed; other factories continue',
           );
         }
+      }
+
+      // Post-drain callbacks (the swap tail) reuse the head this pass already
+      // fetched, so one eth_blockNumber serves both — this matters on a
+      // rate-limited plan. Isolated like the factories: a tail failure must
+      // not stop discovery.
+      for (const callback of this.afterDrain) {
+        await callback(head).catch((error: unknown) => {
+          this.deps.logger.error(
+            { err: error instanceof Error ? error.message : String(error) },
+            'post-drain callback failed',
+          );
+        });
       }
     } catch (error) {
       this.deps.logger.error(

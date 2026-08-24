@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"],
+  "references": [
+    { "path": "../shared" },
+    { "path": "../domain" },
+    { "path": "../database" },
+    { "path": "../discovery" },
+    { "path": "../providers/blockchain" },
+    { "path": "../providers/market-data" }
+  ]
+}

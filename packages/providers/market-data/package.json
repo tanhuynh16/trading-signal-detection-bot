@@ -1,0 +1,15 @@
+{
+  "name": "@sdb/market-data",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "dependencies": {
+    "@sdb/blockchain": "workspace:*",
+    "@sdb/domain": "workspace:*",
+    "@sdb/shared": "workspace:*",
+    "viem": "^2.22.4"
+  }
+}

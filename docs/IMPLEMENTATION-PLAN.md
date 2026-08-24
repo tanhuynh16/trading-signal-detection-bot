@@ -11,7 +11,7 @@ gap resolutions below by their G-numbers.
 |---|---|---|
 | 0 | Foundation: workspace, Docker, schema, config, logging, health | **done** |
 | 1 | Discovery: Uniswap V2/V3 + Aerodrome, dedupe, queueing | **done** |
-| 2 | Snapshot pipeline | not started |
+| 2 | Snapshot pipeline | **done** |
 | 3 | Risk engine | not started |
 | 4a | Features: liquidity, momentum | not started |
 | 4b | Features: holders, clustering, smart money | not started |
@@ -155,7 +155,7 @@ requests sixfold against that cap. Steady-state still hits occasional 429s,
 absorbed by bounded backoff — raising the tier or lowering
 `DISCOVERY_FIRST_START_BACKFILL_BLOCKS` would remove them.
 
-### Phase 2 — Snapshot pipeline (§13)
+### Phase 2 — Snapshot pipeline (§13) ✅
 On-chain `MarketDataProvider` with per-DEX reserve/price readers in a single
 multicall. WETH/USD reference reader. `Swap` log decoder producing normalized
 `trades`. BullMQ delayed jobs at T+0/30s/1m/2m/5m/10m/30m/1h, job ID
@@ -164,8 +164,26 @@ no job schedules its successor** (§13 forbids unbounded recursion). Early-stop
 on risk FAIL, prolonged pool unavailability, or expiry. Block time and wall-clock
 capture time stored separately (§3).
 
-*Accepted when:* replaying a job produces one row; snapshot series are complete;
-provider failures retry with backoff then land in `jobs_audit`, not a loop.
+*Accepted:* verified live — 22 pools discovered and enriched, 88 snapshots
+across the T+0/30s/1m/2m/5m series, 34 trades captured by the tail, zero
+duplicate snapshots or trades, zero permanent failures.
+
+*Verified on-chain facts* (captured as test fixtures, not recalled):
+
+| Fact | Value |
+|---|---|
+| Swap selectors | V2 `0xd78ad95f…`, V3 `0xc42079f9…`, Aerodrome `0xb3e27736…` |
+| WETH/USD reference pool | `0x6c561b446416e1a00e8e93e221854d6ea4171372` (V3 fee-3000, deepest at $69M) |
+| V3 price formula | `(sqrtPriceX96 / 2^96)² × 10^(d0 − d1)` — anchored in tests to ETH ≈ $2,433.78 |
+
+Two ABI traps are pinned by tests: Aerodrome's `getReserves` returns `uint256`
+where Uniswap V2 returns `uint112`, and V2/Aerodrome `Swap` events encode
+**identically** — same topic count, same data layout — differing only in
+selector, so decoders dispatch on selector alone.
+
+Trade capture uses one global tail rather than per-snapshot fetches
+([ADR 0008](adr/0008-global-swap-tail.md)); liquidity is judged over a grace
+period rather than at T+0 ([ADR 0009](adr/0009-liquidity-grace-period.md)).
 
 ### Phase 3 — Risk engine (§14)
 `SecurityProvider` interface with a mock first (§29), then one real adapter —

@@ -1,4 +1,4 @@
-import { parseAbiItem, toEventSelector, type Hex } from 'viem';
+import { parseAbiItem, toEventSelector, type AbiEvent, type Hex } from 'viem';
 import type { Dex } from '@sdb/domain';
 import { canonicalize, type Address } from '@sdb/shared';
 
@@ -20,25 +20,25 @@ export type FactoryDefinition = {
   source: string;
   dex: Dex;
   address: Address;
-  event: ReturnType<typeof parseAbiItem>;
+  event: AbiEvent;
   topic0: Hex;
   /** Where the address came from, kept next to the value it justifies. */
   provenance: string;
 };
 
 // https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments
-const UNISWAP_V2_EVENT = parseAbiItem(
+const UNISWAP_V2_EVENT: AbiEvent = parseAbiItem(
   'event PairCreated(address indexed token0, address indexed token1, address pair, uint256 allPairsLength)',
 );
 
 // https://docs.uniswap.org/contracts/v3/reference/deployments/base-deployments
-const UNISWAP_V3_EVENT = parseAbiItem(
+const UNISWAP_V3_EVENT: AbiEvent = parseAbiItem(
   'event PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)',
 );
 
 // https://github.com/aerodrome-finance/contracts — IPoolFactory.sol
 // Note the third indexed parameter (`stable`), which Uniswap's events lack.
-const AERODROME_EVENT = parseAbiItem(
+const AERODROME_EVENT: AbiEvent = parseAbiItem(
   'event PoolCreated(address indexed token0, address indexed token1, bool indexed stable, address pool, uint256 allPoolsLength)',
 );
 
