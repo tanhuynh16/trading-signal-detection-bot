@@ -15,6 +15,20 @@
       "when": 1787629318244,
       "tag": "0001_absent_forgotten_one",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787665427968,
+      "tag": "0002_outgoing_lake",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787665807470,
+      "tag": "0003_chief_chronomancer",
+      "breakpoints": true
     }
   ]
 }

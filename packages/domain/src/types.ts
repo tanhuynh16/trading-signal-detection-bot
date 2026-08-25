@@ -11,6 +11,25 @@ export type SignalState = 'NEW' | 'WATCHING' | 'INTERESTING' | 'STRONG_SIGNAL' |
 
 export type AlertLevel = 'NONE' | 'INTERESTING' | 'STRONG';
 
+/**
+ * Why we decided an alert was warranted (§18's dedup exceptions). Independent
+ * of what subsequently happened to it.
+ */
+export type AlertTriggerReason =
+  | 'FIRST_ALERT'
+  | 'LEVEL_UPGRADED'
+  | 'SCORE_MOVED'
+  | 'COOLDOWN_ELAPSED';
+
+/**
+ * Lifecycle of an alert decision, deliberately separate from the trigger.
+ *
+ * A boolean cannot express "we decided to alert, tried to send, and failed" —
+ * which is precisely the state Phase 6 must retry, and §20 requires that a
+ * Telegram failure never discards the signal.
+ */
+export type AlertStatus = 'PENDING' | 'SENT' | 'FAILED' | 'SUPPRESSED';
+
 export type Severity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
 /**

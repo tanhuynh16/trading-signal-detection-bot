@@ -3,13 +3,21 @@ import {
   featureSets,
   pools,
   riskResults,
+  signalAlerts,
   signalTransitions,
   signals,
   tokenSnapshots,
   trades,
-  type Database,
+  type DbOrTx,
 } from '@sdb/database';
-import type { AlertLevel, AlphaScore, RiskStatus, SignalState } from '@sdb/domain';
+import type {
+  AlertLevel,
+  AlertStatus,
+  AlertTriggerReason,
+  AlphaScore,
+  RiskStatus,
+  SignalState,
+} from '@sdb/domain';
 import type { PreviousAlert } from './dedupe.js';
 
 /**
@@ -22,6 +30,25 @@ import type { PreviousAlert } from './dedupe.js';
  * would destroy both.
  */
 
+/**
+ * Serialise every state decision for one token.
+ *
+ * The race this closes: two concurrent evaluations both read WATCHING, both
+ * compute INTERESTING, and both insert. A unique index on (token_id, state)
+ * would stop it but would also block legitimate re-entry — with
+ * `downgradePolicyEnabled` a token may go STRONG_SIGNAL -> WATCHING ->
+ * INTERESTING -> WATCHING, which §18 explicitly permits. Serialising the
+ * read-decide-write sequence closes the race without narrowing the spec.
+ *
+ * The lock is transaction-scoped, so it is released on commit OR rollback with
+ * no cleanup path to get wrong. `hashtext` maps the uuid into the int4 the lock
+ * API takes; a collision merely serialises two unrelated tokens, which costs
+ * contention and never correctness.
+ */
+export async function lockToken(tx: DbOrTx, tokenId: string): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${tokenId}))`);
+}
+
 export type CurrentSignal = {
   id: string;
   state: SignalState;
@@ -32,7 +59,7 @@ export type CurrentSignal = {
 
 /** The token's most recent signal row, i.e. its current state. */
 export async function currentSignal(
-  db: Database,
+  db: DbOrTx,
   tokenId: string,
 ): Promise<CurrentSignal | null> {
   const rows = await db
@@ -45,7 +72,10 @@ export async function currentSignal(
     })
     .from(signals)
     .where(eq(signals.tokenId, tokenId))
-    .orderBy(desc(signals.createdAt))
+    // Order by insert sequence, not created_at: now() is transaction-start
+    // time, so overlapping transactions can invert the apparent order and
+    // return a stale state.
+    .orderBy(desc(signals.seq))
     .limit(1);
 
   const row = rows[0];
@@ -59,17 +89,34 @@ export async function currentSignal(
   };
 }
 
-/** Most recent signal that actually carried an alert, for §18 dedup. */
-export async function lastAlert(db: Database, tokenId: string): Promise<PreviousAlert | null> {
+/**
+ * The baseline §18 dedup measures against: the most recent alert that was
+ * actually delivered or is on its way.
+ *
+ * SENT is delivery. PENDING is in flight and counts too — otherwise a second
+ * alert would be queued for the same fact before the first is sent, and until
+ * Phase 6 exists nothing ever reaches SENT so every evaluation would re-alert.
+ *
+ * FAILED and SUPPRESSED are deliberately excluded: a failed delivery must
+ * become re-alertable rather than silently swallowing the signal (§20), and a
+ * suppressed decision was never an alert at all.
+ */
+export async function lastAlert(db: DbOrTx, tokenId: string): Promise<PreviousAlert | null> {
   const rows = await db
     .select({
-      alertLevel: signals.alertLevel,
-      alphaScore: signals.alphaScore,
-      createdAt: signals.createdAt,
+      alertLevel: signalAlerts.alertLevel,
+      alphaScore: signalAlerts.alphaScore,
+      createdAt: signalAlerts.createdAt,
+      sentAt: signalAlerts.sentAt,
     })
-    .from(signals)
-    .where(and(eq(signals.tokenId, tokenId), sql`${signals.alertLevel} <> 'NONE'`))
-    .orderBy(desc(signals.createdAt))
+    .from(signalAlerts)
+    .where(
+      and(
+        eq(signalAlerts.tokenId, tokenId),
+        sql`${signalAlerts.status} IN ('SENT', 'PENDING')`,
+      ),
+    )
+    .orderBy(desc(signalAlerts.seq))
     .limit(1);
 
   const row = rows[0];
@@ -77,13 +124,55 @@ export async function lastAlert(db: Database, tokenId: string): Promise<Previous
   return {
     level: row.alertLevel as AlertLevel,
     alphaScore: Number(row.alphaScore),
-    sentAt: row.createdAt,
+    // Cooldown runs from delivery when we have it, else from the decision.
+    sentAt: row.sentAt ?? row.createdAt,
   };
+}
+
+export type AlertDecisionInput = {
+  signalId: string;
+  tokenId: string;
+  featureSetId: string;
+  alertLevel: AlertLevel;
+  status: AlertStatus;
+  triggerReason: AlertTriggerReason | null;
+  suppressionReason: string | null;
+  alphaScore: number;
+};
+
+/**
+ * Record one alert decision, emitted or suppressed.
+ *
+ * Conflict-safe on (signal_id, feature_set_id): a retried job re-reads the same
+ * feature set and its insert is a no-op, so retries cannot multiply alerts.
+ * Returns null when the decision already existed.
+ */
+export async function recordAlertDecision(
+  tx: DbOrTx,
+  input: AlertDecisionInput,
+): Promise<string | null> {
+  const rows = await tx
+    .insert(signalAlerts)
+    .values({
+      signalId: input.signalId,
+      tokenId: input.tokenId,
+      featureSetId: input.featureSetId,
+      alertLevel: input.alertLevel,
+      status: input.status,
+      triggerReason: input.triggerReason,
+      suppressionReason: input.suppressionReason,
+      alphaScore: input.alphaScore.toFixed(3),
+    })
+    .onConflictDoNothing({
+      target: [signalAlerts.signalId, signalAlerts.featureSetId],
+    })
+    .returning({ id: signalAlerts.id });
+  return rows[0]?.id ?? null;
 }
 
 /** Latest risk verdict. Absent means not yet evaluated — treated as unknown. */
 export async function latestRiskStatus(
-  db: Database,
+  db: DbOrTx,
   tokenId: string,
 ): Promise<RiskStatus | null> {
   const rows = await db
@@ -114,7 +203,7 @@ export type PoolContext = {
  * once held.
  */
 export async function loadPoolContext(
-  db: Database,
+  db: DbOrTx,
   poolId: string,
 ): Promise<PoolContext | null> {
   const rows = await db
@@ -162,7 +251,7 @@ export async function loadPoolContext(
 
 /** Most recent feature set for a pool, and its id for provenance. */
 export async function latestFeatureSet(
-  db: Database,
+  db: DbOrTx,
   poolId: string,
 ): Promise<{ id: string; values: Record<string, number | null> } | null> {
   const rows = await db
@@ -184,7 +273,7 @@ export async function latestFeatureSet(
  * would break the §21 outcome join.
  */
 export async function recordStateEntry(
-  db: Database,
+  tx: DbOrTx,
   input: {
     context: PoolContext;
     fromState: SignalState | null;
@@ -195,7 +284,10 @@ export async function recordStateEntry(
     featureSetId: string | null;
   },
 ): Promise<string> {
-  return db.transaction(async (tx) => {
+  // Runs inside the caller's transaction, which already holds the per-token
+  // advisory lock. Opening a nested transaction here would release nothing and
+  // only obscure where the lock is held.
+  {
     const [signal] = await tx
       .insert(signals)
       .values({
@@ -224,5 +316,5 @@ export async function recordStateEntry(
     });
 
     return signal!.id;
-  });
+  }
 }

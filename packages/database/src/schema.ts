@@ -1,5 +1,6 @@
 import {
   bigint,
+  bigserial,
   boolean,
   index,
   integer,
@@ -264,6 +265,16 @@ export const signals = pgTable(
   'signals',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    /**
+     * Monotonic insert order. `created_at` defaults to now(), which is
+     * TRANSACTION START time — identical for every statement in a transaction.
+     * Two overlapping transactions can therefore write rows whose created_at
+     * order contradicts their commit order, and ordering "latest state" by it
+     * returned a stale row, causing a transition to be applied twice. A
+     * sequence is allocated at insert time, so under the per-token advisory
+     * lock it strictly follows commit order.
+     */
+    seq: bigserial('seq', { mode: 'number' }).notNull(),
     tokenId: uuid('token_id')
       .notNull()
       .references(() => tokens.id),
@@ -288,6 +299,7 @@ export const signals = pgTable(
   },
   (t) => ({
     tokenTimeIdx: index('signals_token_time_idx').on(t.tokenId, t.createdAt),
+    tokenSeqIdx: index('signals_token_seq_idx').on(t.tokenId, t.seq),
     stateIdx: index('signals_state_idx').on(t.state),
   }),
 );
@@ -332,6 +344,58 @@ export const signalOutcomes = pgTable(
   },
   (t) => ({
     horizonIdentity: uniqueIndex('signal_outcomes_signal_horizon_uq').on(t.signalId, t.horizon),
+  }),
+);
+
+/**
+ * Alert decisions (§18 deduplication).
+ *
+ * Separate from `signals` because they answer different questions. ADR 0015
+ * keeps `signals` as the canonical state-transition entity — one row per state
+ * entry, the thing §21 attaches outcomes to. One such signal can legitimately
+ * produce several alert decisions over its life: a first alert, then a re-alert
+ * when the score moves past `rescoreDelta`, then another when the cooldown
+ * lapses. Recording those as extra `signals` rows would corrupt both the state
+ * history and the outcome series.
+ */
+export const signalAlerts = pgTable(
+  'signal_alerts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** Monotonic insert order; see the note on signals.seq. */
+    seq: bigserial('seq', { mode: 'number' }).notNull(),
+    signalId: uuid('signal_id')
+      .notNull()
+      .references(() => signals.id),
+    /** Denormalised so dedup can look up a token's last alert in one query. */
+    tokenId: uuid('token_id')
+      .notNull()
+      .references(() => tokens.id),
+    /** The evaluation that produced this decision; half the idempotency key. */
+    featureSetId: uuid('feature_set_id')
+      .notNull()
+      .references(() => featureSets.id),
+    alertLevel: text('alert_level').notNull(),
+    /** Why we decided to alert: FIRST_ALERT | LEVEL_UPGRADED | SCORE_MOVED | COOLDOWN_ELAPSED */
+    triggerReason: text('trigger_reason'),
+    /** Lifecycle: PENDING | SENT | FAILED | SUPPRESSED */
+    status: text('status').notNull(),
+    /** Set when status is SUPPRESSED, so a non-alert is auditable too. */
+    suppressionReason: text('suppression_reason'),
+    alphaScore: numeric('alpha_score', { precision: 6, scale: 3 }).notNull(),
+    createdAt: createdAt(),
+    /** Filled by Phase 6 on successful delivery. */
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+  },
+  (t) => ({
+    // One decision per signal per evaluation. A retried job re-reads the same
+    // feature set and conflicts; a genuine later re-alert carries a new one.
+    decisionIdentity: uniqueIndex('signal_alerts_signal_feature_uq').on(
+      t.signalId,
+      t.featureSetId,
+    ),
+    // Dedup reads the most recent SENT/PENDING alert for a token.
+    tokenStatusIdx: index('signal_alerts_token_status_idx').on(t.tokenId, t.status, t.seq),
   }),
 );
 

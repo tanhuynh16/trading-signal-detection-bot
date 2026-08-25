@@ -281,6 +281,29 @@ both the feature and component level; the inner level is load-bearing because
 Invariants verified: no signal under a risk FAIL carries an alert level (§27),
 no duplicate rows per token+state, 35 signals with 35 transitions.
 
+### Phase 5.1 — Concurrency and re-alert hardening ✅
+
+Closed the two defects the Phase 5 audit found, plus a third the new tests
+uncovered ([ADR 0016](adr/0016-alert-decisions-and-per-token-serialisation.md)):
+
+1. **Duplicate state-entry race** — the read-decide-write sequence now runs in
+   one transaction under `pg_advisory_xact_lock(hashtext(token_id))`. A unique
+   index was rejected because it would block the state re-entry §18 permits
+   when `downgradePolicyEnabled` is on.
+2. **§18's dedup exceptions were unreachable** — `shouldAlert()` sat below an
+   early return, so `SCORE_MOVED` and `COOLDOWN_ELAPSED` were dead code. Dedup
+   now runs on every evaluation, and decisions live in a new `signal_alerts`
+   table with separate `trigger_reason` and `status` axes, so ADR 0015 stands
+   and `signals` stays the canonical state entity.
+3. **`now()` is transaction-start time** — found by a flaky concurrency test
+   (1 failure in 6). Overlapping transactions could write rows whose
+   `created_at` order contradicted commit order, so "latest state" returned a
+   stale row. Both tables now carry `seq bigserial` and order by it.
+
+Verified: 8 consecutive clean runs of the concurrency suite; live run produced a
+real `SCORE_MOVED` re-alert with no extra `signals` row, zero duplicate
+`(token_id, state)`, and exactly one transition per signal.
+
 ### Phase 6 — Telegram (§20)
 The §20 message format: symbol, CA, age, MC, liquidity, score, "Why" breakdown,
 risk warnings, links. **Send failure must not discard the signal** — bounded
