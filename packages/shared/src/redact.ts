@@ -64,6 +64,25 @@ export function redactDeep(value: unknown, depth = 0): unknown {
   if (depth > 8) return value;
   if (typeof value === 'string') return redactSecrets(value);
   if (Array.isArray(value)) return value.map((item) => redactDeep(item, depth + 1));
+
+  // Date and Error carry nothing in their own enumerable properties, so the
+  // generic object walk below rebuilt them as `{}` — silently erasing every
+  // timestamp and every raw error ever logged, including the unhandled-rejection
+  // handler §24 exists to make visible. Handle both explicitly.
+  if (value instanceof Date) return value;
+  if (value instanceof Error) {
+    const out: Record<string, unknown> = {
+      type: value.name,
+      message: redactSecrets(value.message),
+    };
+    if (value.stack) out['stack'] = redactSecrets(value.stack);
+    // Own enumerable properties carry our errors' `context` and `retryable`.
+    for (const [key, item] of Object.entries(value)) {
+      out[key] = redactDeep(item, depth + 1);
+    }
+    return out;
+  }
+
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {

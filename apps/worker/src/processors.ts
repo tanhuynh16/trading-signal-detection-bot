@@ -1,4 +1,4 @@
-import { Worker, type Job, type Queue } from 'bullmq';
+import { DelayedError, Worker, type Job, type Queue } from 'bullmq';
 import type { Redis } from 'ioredis';
 import type { PublicClient } from 'viem';
 import type { Database } from '@sdb/database';
@@ -21,10 +21,18 @@ import {
 import { evaluateSignal, type DedupeConfig, type TransitionConfig } from '@sdb/signal-engine';
 import type { ScoringConfig } from '@sdb/scoring';
 import {
+  decide,
+  failureCodeOf,
+  isGlobalFailure,
   loadAlertPayload,
   markFailed,
   markSent,
+  onFailure,
+  onSuccess,
+  readCircuit,
   renderAlert,
+  writeCircuit,
+  type CircuitConfig,
   type Notifier,
 } from '@sdb/notifications';
 import { InvalidDataError, isRetryable, withContext, type Logger } from '@sdb/shared';
@@ -48,6 +56,7 @@ export type ProcessorDeps = {
     /** Snapshot offsets at which risk is (re-)evaluated. */
     riskOffsets: readonly string[];
     riskProbeWei: bigint;
+    circuit: CircuitConfig;
     features: FeatureConfig;
     scoring: ScoringConfig;
     transitions: TransitionConfig;
@@ -85,12 +94,16 @@ async function auditFailure(
 function guarded(
   deps: ProcessorDeps,
   queue: string,
-  handler: (job: Job) => Promise<void>,
-): (job: Job) => Promise<void> {
-  return async (job: Job) => {
+  handler: (job: Job, token?: string) => Promise<void>,
+): (job: Job, token?: string) => Promise<void> {
+  return async (job: Job, token?: string) => {
     try {
-      await handler(job);
+      await handler(job, token);
     } catch (error) {
+      // DelayedError is BullMQ's signal that the job was rescheduled, not that
+      // it failed. Swallowing it here would mark the job complete and orphan
+      // the alert it was holding.
+      if (error instanceof DelayedError) throw error;
       if (isRetryable(error)) throw error;
       await auditFailure(deps, queue, job, error);
       deps.logger.warn(
@@ -363,7 +376,7 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
    */
   const notificationWorker = new Worker(
     QUEUE_NAMES.notification,
-    guarded(deps, QUEUE_NAMES.notification, async (job) => {
+    guarded(deps, QUEUE_NAMES.notification, async (job, token) => {
       const { alertId } = job.data as { alertId: string };
       const log = withContext(logger, { correlationId: alertId });
 
@@ -374,6 +387,22 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
         return;
       }
 
+      // §6.1: refuse to attempt delivery while the transport is known broken.
+      // The alert stays PENDING — an obligation still owed — instead of
+      // churning to FAILED and feeding the re-alert loop.
+      const snapshot = await readCircuit(deps.db, deps.notifier.name);
+      const verdict = decide(snapshot, deps.config.circuit);
+      if (!verdict.allow) {
+        log.warn(
+          { alertId, retryAt: verdict.retryAt, failures: snapshot?.consecutiveFailures },
+          'notifier circuit open; alert held pending',
+        );
+        // Reschedule without consuming a retry attempt (BullMQ treats
+        // DelayedError as "rescheduled", not "failed").
+        await job.moveToDelayed(verdict.retryAt.getTime(), token);
+        throw new DelayedError();
+      }
+
       const payload = await loadAlertPayload(deps.db, alertId);
       if (!payload) {
         throw new InvalidDataError(`alert ${alertId} no longer exists`, { alertId });
@@ -382,14 +411,54 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
       try {
         await deps.notifier.send(renderAlert(payload));
       } catch (error) {
-        // A permanent rejection (bad chat id, revoked token, malformed HTML)
-        // is terminal. `guarded()` swallows it after auditing, so the worker's
-        // 'failed' handler never runs — without marking FAILED here the row
-        // would stay PENDING, be requeued on every restart, and block the token
-        // from ever re-alerting, which is exactly the discard §20 forbids.
-        if (!isRetryable(error)) await markFailed(deps.db, alertId);
+        const exhausted = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+        const global = isGlobalFailure(error, exhausted);
+        const transition = onFailure(snapshot, { global, config: deps.config.circuit });
+        await writeCircuit(deps.db, deps.notifier.name, transition, {
+          code: failureCodeOf(error),
+          reason: error instanceof Error ? error.message : String(error),
+        });
+
+        if (transition.justOpened) {
+          // Requirement 7: alerting going silent must never itself be silent.
+          log.error(
+            {
+              notifier: deps.notifier!.name,
+              failureCode: failureCodeOf(error),
+              consecutiveFailures: transition.consecutiveFailures,
+              probeAt: transition.reopenAfter,
+            },
+            'notifier circuit OPENED; alerts will be held pending until it recovers',
+          );
+          await deps.db.insert(jobsAudit).values({
+            queue: QUEUE_NAMES.notification,
+            jobId: job.id ?? 'unknown',
+            correlationId: alertId,
+            status: 'circuit_open',
+            attempts: transition.consecutiveFailures,
+            errorCode: failureCodeOf(error),
+            errorMessage: error instanceof Error ? error.message : String(error),
+            payload: job.data as Record<string, unknown>,
+          });
+        }
+
+        // A globally-failing transport must not burn the alert: hold it PENDING
+        // so the backlog drains once credentials are fixed. Only a per-message
+        // rejection marks this particular alert FAILED.
+        if (!isRetryable(error) && !global) await markFailed(deps.db, alertId);
         throw error;
       }
+
+      // Requirement 6: any success closes the circuit and clears the counter.
+      const success = onSuccess(snapshot);
+      if (success.justClosed) {
+        const downMs = snapshot?.openedAt ? Date.now() - snapshot.openedAt.getTime() : null;
+        log.info(
+          { notifier: deps.notifier.name, openForMs: downMs },
+          'notifier circuit CLOSED; delivery recovered',
+        );
+      }
+      await writeCircuit(deps.db, deps.notifier.name, success, null);
 
       // Guarded on PENDING, so a duplicate job cannot double-send.
       const marked = await markSent(deps.db, alertId);

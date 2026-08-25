@@ -399,6 +399,32 @@ export const signalAlerts = pgTable(
   }),
 );
 
+/**
+ * Circuit-breaker state for a notification transport.
+ *
+ * Durable in Postgres rather than Redis for two reasons: it must survive a
+ * restart AND a FLUSHALL, and it is the operator-facing record of why alerting
+ * went quiet. A breaker whose state evaporates on restart would reopen the
+ * floodgates on every deploy.
+ *
+ * One row per transport, keyed by name.
+ */
+export const notifierCircuit = pgTable('notifier_circuit', {
+  notifier: text('notifier').primaryKey(),
+  /** CLOSED | OPEN | HALF_OPEN */
+  state: text('state').notNull().default('CLOSED'),
+  /** Consecutive GLOBAL failures. Reset to 0 by any success. */
+  consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+  openedAt: timestamp('opened_at', { withTimezone: true }),
+  /** When a single probe may next be admitted. */
+  reopenAfter: timestamp('reopen_after', { withTimezone: true }),
+  lastFailureCode: text('last_failure_code'),
+  lastFailureReason: text('last_failure_reason'),
+  lastFailureAt: timestamp('last_failure_at', { withTimezone: true }),
+  lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 /** Spec §23: permanent failures land here rather than retrying forever. */
 export const jobsAudit = pgTable(
   'jobs_audit',

@@ -44,6 +44,13 @@ const envSchema = z.object({
 
   API_PORT: z.coerce.number().int().positive().default(3000),
 
+  // §6.1 notifier circuit breaker. A 401/403 is a global configuration fault
+  // that will fail identically for every alert, so retrying it per token only
+  // produces failure spam.
+  NOTIFIER_CIRCUIT_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  NOTIFIER_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().positive().default(3),
+  NOTIFIER_CIRCUIT_OPEN_MS: z.coerce.number().int().positive().default(300_000),
+
   // Spec §10.2: replay overlap so a restart cannot skip blocks.
   DISCOVERY_BLOCK_OVERLAP: z.coerce.number().int().nonnegative().default(50),
 

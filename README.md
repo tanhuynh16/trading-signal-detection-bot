@@ -24,6 +24,7 @@ repository deviates, the reason is in [`docs/adr/`](docs/adr/).
 | 4     | Features (liquidity, momentum, holders, clustering, smart money) | **done**    |
 | 5     | Normalization, scoring, signal state machine                     | **done**    |
 | 6     | Telegram                                                         | **done**    |
+| 6.1   | Notification failure hardening (circuit breaker)                 | **done**    |
 | 7     | Outcome tracking                                                 | not started |
 | 8     | Strategy evaluation                                              | not started |
 

@@ -309,6 +309,35 @@ The §20 message format: symbol, CA, age, MC, liquidity, score, "Why" breakdown,
 risk warnings, links. **Send failure must not discard the signal** — bounded
 retries through the `notification` queue, then `jobs_audit`.
 
+Symbols are attacker-controlled, so every interpolated field is HTML-escaped
+(ADR 0017). Alerts are recorded `PENDING` and requeued at startup, so an alert
+outlives the process that decided it.
+
+### Phase 6.1 — Notification failure hardening ✅
+Phase 6 measured a defect it could not fix from inside: a permanently broken
+transport produced **one failed send per feature evaluation, per token** — ~8
+per token across the §13 series. `FAILED` is correctly excluded from dedup (§20
+forbids discarding the signal), so every evaluation recorded a fresh alert that
+failed identically.
+
+A circuit breaker now separates a **global** fault from a per-message one. After
+three consecutive global failures it opens for five minutes, then admits one
+probe; any success closes it. While open the alert stays `PENDING` — an
+obligation still owed — rather than churning to `FAILED` and feeding the
+re-alert loop. State lives in `notifier_circuit` in Postgres so it survives both
+a restart and a Redis `FLUSHALL` (ADR 0018).
+
+Probing the live Bot API corrected the design: a wrong chat id answers **400
+`chat not found`**, not 401/403, and a revoked token answers **404**. An
+HTTP-status table misclassified both of the most likely misconfigurations, so
+the transport now classifies its own faults and the status heuristic is only a
+fallback.
+
+Verified live: attempts stopped at exactly 3, all seeded alerts stayed `PENDING`
+with zero `FAILED`, one `circuit_open` audit row; after a Redis flush the
+circuit was still `OPEN`, and restoring the chat id let a probe close it and
+drain the held backlog.
+
 ### Phase 7 — Outcome tracking (§21)
 Horizon jobs at 1m/5m/15m/30m/1h/4h/24h on the same durable scheduler as
 snapshots. `return_pct`, `max_runup_pct`, `max_drawdown_pct` from the

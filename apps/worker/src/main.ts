@@ -148,6 +148,13 @@ const workers = startProcessors({
     },
     riskOffsets: strategy.risk.evaluateAtOffsets,
     riskProbeWei: BigInt(env.RISK_PROBE_WEI),
+    // §6.1: a globally broken transport is held open rather than retried per
+    // token, so a bad credential cannot generate one failed send per evaluation.
+    circuit: {
+      enabled: env.NOTIFIER_CIRCUIT_ENABLED,
+      failureThreshold: env.NOTIFIER_CIRCUIT_FAILURE_THRESHOLD,
+      openDurationMs: env.NOTIFIER_CIRCUIT_OPEN_MS,
+    },
     features: {
       holders: {
         dustThresholdRaw: BigInt(strategy.holders.dustThresholdRaw),

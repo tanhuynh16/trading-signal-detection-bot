@@ -64,3 +64,34 @@ describe('redactDeep', () => {
     expect(out).toEqual({ n: 42, b: true, nil: null });
   });
 });
+
+describe('redactDeep preserves values that carry no enumerable properties', () => {
+  it('keeps a Date instead of flattening it to {}', () => {
+    // Found live: the generic object walk rebuilt Date from its own enumerable
+    // properties — of which it has none — so every logged timestamp read `{}`.
+    // The circuit breaker's "when will alerting resume" was blank because of it.
+    const when = new Date('2026-08-25T16:28:02.383Z');
+    expect(redactDeep({ probeAt: when })).toEqual({ probeAt: when });
+    expect(JSON.stringify(redactDeep({ probeAt: when }))).toContain('2026-08-25T16:28:02.383Z');
+  });
+
+  it('keeps an Error message and stack, still scrubbed', () => {
+    // main.ts logs a raw Error for an unhandled rejection; it read `{}` too.
+    registerSecret('super-secret-key');
+    const error = new Error('request to https://rpc.example/v2/super-secret-key failed');
+    const out = redactDeep({ err: error }) as { err: Record<string, unknown> };
+
+    expect(out.err['type']).toBe('Error');
+    expect(out.err['message']).not.toContain('super-secret-key');
+    expect(out.err['message']).toContain('[REDACTED]');
+    expect(out.err['stack']).toBeTypeOf('string');
+  });
+
+  it('keeps our errors own properties, such as context', () => {
+    const error = Object.assign(new Error('telegram rejected the message (400)'), {
+      context: { httpStatus: 400, global: true },
+    });
+    const out = redactDeep({ err: error }) as { err: Record<string, unknown> };
+    expect(out.err['context']).toEqual({ httpStatus: 400, global: true });
+  });
+});
