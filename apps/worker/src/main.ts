@@ -8,6 +8,7 @@ import { QuotePriceResolver } from '@sdb/market-data';
 import { GoPlusSecurityProvider } from '@sdb/security';
 import { DEFAULT_RULE_CONFIG } from '@sdb/risk-engine';
 import { DEFAULT_COMPONENTS, DEFAULT_PENALTIES } from '@sdb/scoring';
+import { pendingAlerts, TelegramNotifier, type Notifier } from '@sdb/notifications';
 import { SwapTail } from '@sdb/snapshot-engine';
 import { TransferTail } from '@sdb/holder-index';
 import { startProcessors } from './processors.js';
@@ -107,6 +108,21 @@ const transferTail = new TransferTail({
   },
 });
 
+// §20 delivery. Absent credentials the pipeline still runs and records alert
+// decisions; they simply stay PENDING until a transport exists, rather than
+// being marked FAILED for something that was never attempted.
+const notifier: Notifier | null =
+  env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID
+    ? new TelegramNotifier({
+        botToken: env.TELEGRAM_BOT_TOKEN,
+        chatId: env.TELEGRAM_CHAT_ID,
+      })
+    : null;
+
+if (!notifier) {
+  logger.warn('telegram credentials absent; alerts will be recorded but not sent');
+}
+
 const workers = startProcessors({
   db,
   http: chain.http,
@@ -115,6 +131,7 @@ const workers = startProcessors({
   quotePrices,
   logger,
   goplus,
+  notifier,
   config: {
     minLiquidityUsd: strategy.discovery.minLiquidityUsd,
     liquidityGraceMinutes: env.LIQUIDITY_GRACE_MINUTES,
@@ -240,6 +257,32 @@ discovery.onDrained(async (head) => {
     );
   }
 });
+
+/**
+ * Requeue alerts left PENDING by a previous run.
+ *
+ * A PENDING row is a decision that survived dedup and is owed a delivery. If
+ * the worker died between recording it and the queue job being consumed — or
+ * Redis was flushed — the job is gone but the obligation is not. §20 requires
+ * the signal not be discarded, so the durable table is the source of truth and
+ * the queue is rebuilt from it at startup.
+ *
+ * Job IDs are keyed on the alert, so requeueing something still in flight is a
+ * no-op rather than a double send.
+ */
+const orphaned = await pendingAlerts(db);
+if (orphaned.length > 0) {
+  await Promise.all(
+    orphaned.map((alertId) =>
+      queues[QUEUE_NAMES.notification]!.add(
+        'send',
+        { alertId },
+        { ...DEFAULT_JOB_OPTIONS, jobId: jobId.notification(alertId) },
+      ),
+    ),
+  );
+  logger.info({ count: orphaned.length }, 'requeued pending alerts from a previous run');
+}
 
 await discovery.start();
 

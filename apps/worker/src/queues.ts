@@ -26,7 +26,13 @@ export const jobId = {
   snapshot: (poolId: string, offsetLabel: string) => `snapshot.${poolId}.${offsetLabel}`,
   riskAnalysis: (tokenId: string, poolId: string) => `risk.${tokenId}.${poolId}`,
   featureCalculation: (poolId: string, offsetLabel: string) => `features.${poolId}.${offsetLabel}`,
-  notification: (signalId: string, alertLevel: string) => `notify.${signalId}.${alertLevel}`,
+  /**
+   * Keyed on the ALERT, not the signal. Phase 5.1 lets one signal produce
+   * several alert decisions (FIRST_ALERT, then SCORE_MOVED, then
+   * COOLDOWN_ELAPSED) all at the same level; keying on signal+level would
+   * collide and BullMQ would silently drop every re-alert.
+   */
+  notification: (alertId: string) => `notify.${alertId}`,
   outcome: (signalId: string, horizon: string) => `outcome.${signalId}.${horizon}`,
 };
 

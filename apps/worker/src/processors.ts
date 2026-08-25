@@ -20,7 +20,14 @@ import {
 } from '@sdb/feature-engine';
 import { evaluateSignal, type DedupeConfig, type TransitionConfig } from '@sdb/signal-engine';
 import type { ScoringConfig } from '@sdb/scoring';
-import { isRetryable, withContext, type Logger } from '@sdb/shared';
+import {
+  loadAlertPayload,
+  markFailed,
+  markSent,
+  renderAlert,
+  type Notifier,
+} from '@sdb/notifications';
+import { InvalidDataError, isRetryable, withContext, type Logger } from '@sdb/shared';
 import type { GoPlusSecurityProvider } from '@sdb/security';
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES, jobId } from './queues.js';
 
@@ -32,6 +39,8 @@ export type ProcessorDeps = {
   quotePrices: QuotePriceResolver;
   logger: Logger;
   goplus: GoPlusSecurityProvider | null;
+  /** Null when no credentials are configured; alerts then stay PENDING. */
+  notifier: Notifier | null;
   config: {
     minLiquidityUsd: number;
     liquidityGraceMinutes: number;
@@ -319,6 +328,16 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
         poolId,
       );
 
+      // §20 delivery. Phase 5 only recorded the decision; a PENDING row is one
+      // that survived dedup and is waiting to be sent.
+      if (signal?.alertDecision?.status === 'PENDING' && signal.alertDecision.id) {
+        await queues[QUEUE_NAMES.notification]!.add(
+          'send',
+          { alertId: signal.alertDecision.id },
+          { ...DEFAULT_JOB_OPTIONS, jobId: jobId.notification(signal.alertDecision.id) },
+        );
+      }
+
       if (signal?.changed) {
         log.info(
           {
@@ -336,11 +355,75 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
     { connection, concurrency: 4 },
   );
 
+  /**
+   * notification: render and deliver one alert (§20).
+   *
+   * Concurrency 1: Telegram rate-limits per chat, and a burst of parallel sends
+   * would manufacture the very failures the retry path exists to absorb.
+   */
+  const notificationWorker = new Worker(
+    QUEUE_NAMES.notification,
+    guarded(deps, QUEUE_NAMES.notification, async (job) => {
+      const { alertId } = job.data as { alertId: string };
+      const log = withContext(logger, { correlationId: alertId });
+
+      if (!deps.notifier) {
+        // No transport configured. Leave the row PENDING rather than marking it
+        // FAILED — nothing was attempted, and FAILED would let dedup re-alert.
+        log.warn({ alertId }, 'no notifier configured; alert left pending');
+        return;
+      }
+
+      const payload = await loadAlertPayload(deps.db, alertId);
+      if (!payload) {
+        throw new InvalidDataError(`alert ${alertId} no longer exists`, { alertId });
+      }
+
+      try {
+        await deps.notifier.send(renderAlert(payload));
+      } catch (error) {
+        // A permanent rejection (bad chat id, revoked token, malformed HTML)
+        // is terminal. `guarded()` swallows it after auditing, so the worker's
+        // 'failed' handler never runs — without marking FAILED here the row
+        // would stay PENDING, be requeued on every restart, and block the token
+        // from ever re-alerting, which is exactly the discard §20 forbids.
+        if (!isRetryable(error)) await markFailed(deps.db, alertId);
+        throw error;
+      }
+
+      // Guarded on PENDING, so a duplicate job cannot double-send.
+      const marked = await markSent(deps.db, alertId);
+      log.info(
+        { alertId, level: payload.alertLevel, symbol: payload.symbol, firstTransition: marked },
+        'alert sent',
+      );
+    }),
+    { connection, concurrency: 1, limiter: { max: 20, duration: 60_000 } },
+  );
+
+  /**
+   * §20: "Failure to send Telegram must not discard the signal." Once bounded
+   * retries are exhausted the alert is marked FAILED — and Phase 5.1's dedup
+   * counts only SENT/PENDING, so the token becomes eligible to alert again
+   * rather than going silent.
+   */
+  notificationWorker.on('failed', (job, error) => {
+    if (!job) return;
+    const exhausted = job.attemptsMade >= (job.opts.attempts ?? 1);
+    if (!exhausted) return;
+    const { alertId } = job.data as { alertId: string };
+    void markFailed(deps.db, alertId).then(() =>
+      logger.error({ alertId, attempts: job.attemptsMade, err: error.message },
+        'alert delivery failed permanently; token may re-alert'),
+    );
+  });
+
   for (const [worker, name] of [
     [discoveryWorker, QUEUE_NAMES.discoveryAnalysis],
     [snapshotWorker, QUEUE_NAMES.snapshot],
     [riskWorker, QUEUE_NAMES.riskAnalysis],
     [featureWorker, QUEUE_NAMES.featureCalculation],
+    [notificationWorker, QUEUE_NAMES.notification],
   ] as const) {
     worker.on('failed', (job, error) => {
       logger.error(
@@ -350,7 +433,7 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
     });
   }
 
-  return [discoveryWorker, snapshotWorker, riskWorker, featureWorker];
+  return [discoveryWorker, snapshotWorker, riskWorker, featureWorker, notificationWorker];
 }
 
 /** Cancel a pool's not-yet-due snapshot jobs. */

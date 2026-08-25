@@ -17,7 +17,7 @@ gap resolutions below by their G-numbers.
 | 4b | Features: holders, clustering, smart money | **done** |
 | R | Replay/backfill harness (cross-cutting, alongside Phase 4) | not started |
 | 5 | Normalization, scoring, signal state machine | **done** |
-| 6 | Telegram | not started |
+| 6 | Telegram | **done** (delivery unverified) |
 | 7 | Outcome tracking | not started |
 | 8 | Strategy evaluation | not started |
 
@@ -304,7 +304,7 @@ Verified: 8 consecutive clean runs of the concurrency suite; live run produced a
 real `SCORE_MOVED` re-alert with no extra `signals` row, zero duplicate
 `(token_id, state)`, and exactly one transition per signal.
 
-### Phase 6 — Telegram (§20)
+### Phase 6 — Telegram (§20) ✅
 The §20 message format: symbol, CA, age, MC, liquidity, score, "Why" breakdown,
 risk warnings, links. **Send failure must not discard the signal** — bounded
 retries through the `notification` queue, then `jobs_audit`.

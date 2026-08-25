@@ -52,6 +52,9 @@
     },
     {
       "path": "../../packages/signal-engine"
+    },
+    {
+      "path": "../../packages/notifications"
     }
   ]
 }

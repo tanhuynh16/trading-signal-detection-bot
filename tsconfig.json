@@ -44,6 +44,9 @@
       "path": "packages/signal-engine"
     },
     {
+      "path": "packages/notifications"
+    },
+    {
       "path": "apps/api"
     },
     {

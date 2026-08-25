@@ -23,7 +23,7 @@ repository deviates, the reason is in [`docs/adr/`](docs/adr/).
 | 3     | Risk engine                                                      | **done**    |
 | 4     | Features (liquidity, momentum, holders, clustering, smart money) | **done**    |
 | 5     | Normalization, scoring, signal state machine                     | **done**    |
-| 6     | Telegram                                                         | not started |
+| 6     | Telegram                                                         | **done**    |
 | 7     | Outcome tracking                                                 | not started |
 | 8     | Strategy evaluation                                              | not started |
 

@@ -80,6 +80,9 @@ importers:
       '@sdb/market-data':
         specifier: workspace:*
         version: link:../../packages/providers/market-data
+      '@sdb/notifications':
+        specifier: workspace:*
+        version: link:../../packages/notifications
       '@sdb/risk-engine':
         specifier: workspace:*
         version: link:../../packages/risk-engine
@@ -210,6 +213,21 @@ importers:
       viem:
         specifier: ^2.22.4
         version: 2.55.19(typescript@5.9.3)(zod@3.25.76)
+
+  packages/notifications:
+    dependencies:
+      '@sdb/database':
+        specifier: workspace:*
+        version: link:../database
+      '@sdb/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@sdb/shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: ^0.38.3
+        version: 0.38.4(postgres@3.4.9)
 
   packages/providers/blockchain:
     dependencies:

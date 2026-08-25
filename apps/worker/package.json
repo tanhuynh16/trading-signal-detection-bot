@@ -25,6 +25,7 @@
     "@sdb/feature-engine": "workspace:*",
     "@sdb/holder-index": "workspace:*",
     "@sdb/scoring": "workspace:*",
-    "@sdb/signal-engine": "workspace:*"
+    "@sdb/signal-engine": "workspace:*",
+    "@sdb/notifications": "workspace:*"
   }
 }
