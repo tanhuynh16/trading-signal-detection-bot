@@ -229,6 +229,26 @@ seeded wallet list plus a versioned `wallet_alpha_score`.
 *Accepted when:* every feature is a tested pure function; null propagates rather
 than degrading to 0; features recompute from stored data (§27).
 
+### Phase 4 review gate ✅
+
+A gate run against `8f11668` found five issues, all fixed before Phase 5
+([ADR 0014](adr/0014-phase-4-review-gate-corrections.md)):
+
+1. **Valid tokens permanently dropped by rate limiting** — `readTokenMetadata`
+   classified every multicall failure as permanent. The dropped tokens were
+   ordinary ERC-20s. Now verified on chain before being condemned.
+2. **Smart-wallet entries never detected** — `smartEntries` was hardcoded `[]`,
+   which would have reported a measured 0 the moment a wallet was seeded.
+3. **`feature_sets` had no uniqueness guard** — a retried job could duplicate a
+   row and corrupt `holder_growth_rate`.
+4. **`volume_acceleration_5m` measured trade count, not USD volume** — measured
+   live, 5 trades worth $5.76 versus 28 worth $1,871.
+5. Three §15 deviations documented.
+
+Verified after the fixes: zero `jobs_audit` rows, zero duplicate
+`(pool_id, scheduled_offset)` groups, null discipline intact (105 nulls,
+0 coerced zeros), 309 tests passing.
+
 ### Phase R — Replay/backfill harness
 `bin/backfill --from-block --to-block` runs historical ranges through
 discovery → snapshot → features → scoring into a shadow schema.

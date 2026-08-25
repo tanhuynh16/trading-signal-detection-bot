@@ -270,7 +270,13 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
       const { poolId, offset } = job.data as { poolId: string; offset: string };
 
       const features = await calculateFeatures(
-        { db: deps.db, logger: deps.logger, config: deps.config.features, http: deps.http },
+        {
+          db: deps.db,
+          logger: deps.logger,
+          config: deps.config.features,
+          http: deps.http,
+          quotePricing: deps.quotePrices,
+        },
         poolId,
         offset,
       );

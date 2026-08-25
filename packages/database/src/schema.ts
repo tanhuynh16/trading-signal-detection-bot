@@ -240,12 +240,22 @@ export const featureSets = pgTable(
       .references(() => pools.id),
     calculatedAt: timestamp('calculated_at', { withTimezone: true }).notNull(),
     featureVersion: text('feature_version').notNull(),
+    /**
+     * Which snapshot this feature set was computed for ('T0', '30s', ...).
+     * Nullable so rows written before this column existed keep NULL, which
+     * Postgres treats as distinct in the unique index below.
+     */
+    scheduledOffset: text('scheduled_offset'),
     /** Spec §15: nulls are represented explicitly, never coerced to 0. */
     values: jsonb('values').notNull(),
     normalizedValues: jsonb('normalized_values').notNull(),
     createdAt: createdAt(),
   },
   (t) => ({
+    // Without this a retried feature job inserts a SECOND row: BullMQ's jobId
+    // stops re-enqueueing but not the 5 configured retry attempts. Every other
+    // pipeline table already carries an equivalent guard.
+    jobIdentity: uniqueIndex('feature_sets_pool_offset_uq').on(t.poolId, t.scheduledOffset),
     poolTimeIdx: index('feature_sets_pool_time_idx').on(t.poolId, t.calculatedAt),
   }),
 );

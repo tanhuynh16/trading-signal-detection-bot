@@ -8,6 +8,7 @@ import {
 } from './momentum.js';
 
 const window = (over: Partial<TradeWindow> = {}): TradeWindow => ({
+  quoteVolumeRaw: 1000n,
   volumeUsd: 1000,
   buyCount: 10,
   sellCount: 5,

@@ -146,19 +146,82 @@ export async function readTokenMetadata(
     ],
   });
 
-  if (decimals.status === 'failure') {
-    throw new InvalidDataError(`token ${address} has no readable decimals()`, {
-      cause: decimals.error.message,
-    });
-  }
+  const decimalsValue =
+    decimals.status === 'success'
+      ? Number(decimals.result)
+      : await resolveDecimals(client, address, decimals.error);
 
   return {
     address,
     symbol: symbol.status === 'success' ? sanitizeText(symbol.result) : null,
     name: name.status === 'success' ? sanitizeText(name.result) : null,
-    decimals: Number(decimals.result),
+    decimals: decimalsValue,
     totalSupplyRaw: totalSupply.status === 'success' ? (totalSupply.result as bigint) : 0n,
   };
+}
+
+/**
+ * Recover `decimals()` after a multicall entry failed, and classify the failure
+ * honestly if it cannot be recovered.
+ *
+ * A multicall entry can fail two very different ways: the contract genuinely
+ * has no `decimals()` (permanent — the token is unusable), or the request was
+ * throttled or timed out (transient). The original code assumed the first and
+ * threw `InvalidDataError`, which `guarded()` routes straight to `jobs_audit`
+ * and never retries.
+ *
+ * That assumption was wrong and measurably costly. Both tokens dropped in a
+ * Phase 4 run were probed on chain afterwards and are ordinary ERC-20s
+ * (decimals 18, supply 1e27, identical launcher bytecode) — lost to rate
+ * limiting, roughly a quarter of that run's discoveries. Note the sibling
+ * `unwrap()` in this same file already treats an identical failure as
+ * transient; the two disagreed.
+ *
+ * So: re-read directly first, and only condemn the token if the chain itself
+ * says there is nothing there.
+ */
+async function resolveDecimals(
+  client: PublicClient,
+  address: Address,
+  multicallError: Error,
+): Promise<number> {
+  try {
+    const direct = await client.readContract({
+      address,
+      abi: ERC20_ABI,
+      functionName: 'decimals',
+    });
+    return Number(direct);
+  } catch (directError) {
+    // The direct read failed too. An address with no bytecode cannot have a
+    // decimals() to read, which is permanent; anything else is the provider
+    // failing us, not the token.
+    let hasCode: boolean;
+    try {
+      const code = await client.getCode({ address });
+      hasCode = code !== undefined && code !== '0x';
+    } catch {
+      // Even the code check failed — clearly a provider problem, so treat the
+      // token as innocent and let the job retry.
+      throw new TransientProviderError(`could not verify decimals() for ${address}`, {
+        cause: message(directError),
+      });
+    }
+
+    if (!hasCode) {
+      throw new InvalidDataError(`token ${address} has no contract code`, {
+        cause: message(multicallError),
+      });
+    }
+
+    throw new TransientProviderError(`decimals() unreadable for ${address}; will retry`, {
+      cause: message(directError),
+    });
+  }
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

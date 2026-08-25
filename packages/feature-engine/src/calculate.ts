@@ -30,7 +30,8 @@ import {
   latestSnapshot,
   liquiditySeries,
   loadHolderBalances,
-  windowVolume,
+  smartWalletEntries,
+  windowVolumeUsd,
 } from './windows.js';
 
 /** Bump when a formula changes, so stored values remain interpretable (§27). */
@@ -48,12 +49,23 @@ export type FeatureConfig = {
   chainId: number;
 };
 
+/**
+ * Resolves the USD price and decimals of a quote token. Supplied by the worker,
+ * which already holds a cached `QuotePriceResolver`.
+ */
+export type QuotePricing = {
+  getUsdPrice(tokenAddress: string): Promise<bigint | null>;
+  decimalsFor(tokenAddress: string): number;
+};
+
 export type FeatureContext = {
   db: Database;
   logger: Logger;
   config: FeatureConfig;
   /** Needed only for §15.4 funding lookups. */
   http?: PublicClient;
+  /** Needed to express trade volume in dollars rather than trade counts. */
+  quotePricing?: QuotePricing;
 };
 
 /**
@@ -67,6 +79,8 @@ export type CalculatedFeatures = {
   tokenId: string;
   poolId: string;
   calculatedAt: Date;
+  /** Which snapshot this was computed for; the idempotency key. */
+  scheduledOffset: string | null;
   values: FeatureSet;
 };
 
@@ -132,6 +146,17 @@ export async function calculateFeatures(
   const current = windows[0]!;
   const priors = windows.slice(1);
 
+  // Volume in dollars, not trade counts. Null when the quote token has no USD
+  // path, which propagates to a null acceleration rather than a fabricated one.
+  const quoteUsd = ctx.quotePricing
+    ? await ctx.quotePricing.getUsdPrice(pool.quoteTokenAddress)
+    : null;
+  const quoteDecimals = ctx.quotePricing
+    ? ctx.quotePricing.decimalsFor(pool.quoteTokenAddress)
+    : 18;
+  const toUsdVolume = (w: (typeof windows)[number]) =>
+    windowVolumeUsd(w, quoteUsd, quoteDecimals);
+
   // ---- §15.3 holders -------------------------------------------------------
   const balances = await loadHolderBalances(ctx.db, pool.tokenId);
   const totalSupply = pool.totalSupplyRaw ? BigInt(pool.totalSupplyRaw) : null;
@@ -164,8 +189,14 @@ export async function calculateFeatures(
       );
     }
   }
-  const smartEntries: SmartEntry[] = [];
   const seededCount = ctx.config.seedWallets.size;
+  // Was hardcoded to []: §15.5 could never observe an entry even with a seeded
+  // list, so the count would have read as a measured 0 rather than null.
+  const smartEntries: SmartEntry[] = await smartWalletEntries(ctx.db, {
+    poolId,
+    seedWallets: ctx.config.seedWallets,
+    baseIsToken0,
+  });
 
   const values: FeatureSet = {
     // §15.1
@@ -176,8 +207,8 @@ export async function calculateFeatures(
 
     // §15.2
     volume_acceleration_5m: volumeAcceleration(
-      windowVolume(current),
-      priors.map(windowVolume),
+      toUsdVolume(current),
+      priors.map(toUsdVolume),
     ),
     buy_sell_ratio: buySellRatio(current),
     trade_velocity: tradeVelocity(current),
@@ -214,7 +245,13 @@ export async function calculateFeatures(
     ),
   };
 
-  return { tokenId: pool.tokenId, poolId: pool.poolId, calculatedAt, values };
+  return {
+    tokenId: pool.tokenId,
+    poolId: pool.poolId,
+    calculatedAt,
+    scheduledOffset: offset ?? null,
+    values,
+  };
 }
 
 /** Most recent feature set for a pool; source of the previous holder count. */
@@ -243,7 +280,7 @@ async function previousFeatureSet(
 export async function persistFeatures(
   db: Database,
   features: CalculatedFeatures,
-): Promise<string> {
+): Promise<string | null> {
   const [row] = await db
     .insert(featureSets)
     .values({
@@ -251,11 +288,18 @@ export async function persistFeatures(
       poolId: features.poolId,
       calculatedAt: features.calculatedAt,
       featureVersion: FEATURE_VERSION,
+      scheduledOffset: features.scheduledOffset,
       values: features.values,
       normalizedValues: sql`'{}'::jsonb`,
     })
+    // A retried job (5 attempts are configured) previously inserted a SECOND
+    // row. Duplicates also corrupt holder_growth_rate, which reads the previous
+    // feature set and divides by the elapsed interval between them.
+    .onConflictDoNothing({
+      target: [featureSets.poolId, featureSets.scheduledOffset],
+    })
     .returning({ id: featureSets.id });
-  return row!.id;
+  return row?.id ?? null;
 }
 
 /** How many features were actually measurable? Useful for observability. */

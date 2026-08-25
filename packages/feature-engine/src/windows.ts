@@ -1,5 +1,6 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, min, sql } from 'drizzle-orm';
 import { holderBalances, tokenSnapshots, trades, type Database } from '@sdb/database';
+import { fromRaw, mul, toNumber } from '@sdb/shared';
 import type { TradeWindow } from './momentum.js';
 import type { HolderBalance } from './holders.js';
 import type { LiquiditySample } from './liquidity.js';
@@ -30,17 +31,34 @@ export async function tradeWindow(
   const from = input.from.toISOString();
   const to = input.to.toISOString();
 
+  /**
+   * Volume comes from the QUOTE side of each swap.
+   *
+   * `trades.usd_value` is never populated — valuing each trade individually
+   * would need a price lookup per trade — so this previously fell through to a
+   * trade COUNT, which is a different signal: ten dust trades and one whale
+   * trade are not the same volume. The quote side is always WETH/USDC/DAI,
+   * whose USD price the pipeline already resolves and caches, so summing raw
+   * quote amounts here and converting once in the caller gives real dollars.
+   *
+   * Column naming is a legacy trap: base_amount_raw/quote_amount_raw actually
+   * hold amount0/amount1 as emitted, NOT base/quote. So the quote side is
+   * quote_amount_raw when the candidate is token0, and base_amount_raw when it
+   * is token1 — the same inversion buyMarker applies above.
+   */
+  const quoteColumn = input.baseIsToken0 ? trades.quoteAmountRaw : trades.baseAmountRaw;
+
   const rows = await db.execute<{
     buy_count: string;
     sell_count: string;
     unique_buyers: string;
-    volume_usd: string | null;
+    quote_volume_raw: string | null;
   }>(sql`
     SELECT
       count(*) FILTER (WHERE side = ${buyMarker})               AS buy_count,
       count(*) FILTER (WHERE side <> ${buyMarker})              AS sell_count,
       count(DISTINCT wallet) FILTER (WHERE side = ${buyMarker}) AS unique_buyers,
-      sum(${trades.usdValue})                                   AS volume_usd
+      sum(abs(${quoteColumn}))                                  AS quote_volume_raw
     FROM ${trades}
     WHERE ${trades.poolId} = ${input.poolId}
       AND ${trades.occurredAt} >  ${from}::timestamptz
@@ -54,11 +72,28 @@ export async function tradeWindow(
     buyCount: Number(row?.buy_count ?? 0),
     sellCount: Number(row?.sell_count ?? 0),
     uniqueBuyers: Number(row?.unique_buyers ?? 0),
-    // Trades are stored without USD valuation (that would need a price lookup
-    // per trade); volume falls back to trade count elsewhere. Null, not 0.
-    volumeUsd: row?.volume_usd != null ? Number(row.volume_usd) : null,
+    // Raw quote units; the caller converts to USD once it knows the quote
+    // token's decimals and price. Null means no trades, not zero volume.
+    quoteVolumeRaw: row?.quote_volume_raw != null ? BigInt(row.quote_volume_raw) : null,
+    volumeUsd: null,
     durationMinutes,
   };
+}
+
+/**
+ * Convert a window's raw quote volume into USD.
+ *
+ * Returns null when the quote token has no USD path — a pool quoted in an
+ * unrecognised asset has no dollar volume we can honestly report, and §15
+ * forbids substituting a number for missing data.
+ */
+export function windowVolumeUsd(
+  window: TradeWindow,
+  quoteUsd: bigint | null,
+  quoteDecimals: number,
+): number | null {
+  if (window.quoteVolumeRaw === null || quoteUsd === null) return null;
+  return toNumber(mul(fromRaw(window.quoteVolumeRaw, quoteDecimals), quoteUsd));
 }
 
 /**
@@ -89,19 +124,7 @@ export async function consecutiveWindows(
   return windows;
 }
 
-/**
- * Volume proxy for a window.
- *
- * `trades.usd_value` is not populated (valuing each trade individually would
- * cost a price lookup per trade), so trade count stands in as the volume
- * measure. Acceleration is a *ratio* of like windows, so a consistent proxy
- * preserves the signal §15.2 is after even though the unit is not dollars.
- */
-export function windowVolume(window: TradeWindow): number | null {
-  if (window.volumeUsd !== null) return window.volumeUsd;
-  const trades = window.buyCount + window.sellCount;
-  return trades > 0 ? trades : 0;
-}
+
 
 /** Liquidity series for a pool, oldest first. */
 export async function liquiditySeries(
@@ -164,4 +187,51 @@ export async function loadHolderBalances(
     balanceRaw: BigInt(row.balanceRaw),
     firstAcquiredAt: row.firstAcquiredAt,
   }));
+}
+
+
+/**
+ * Seeded smart wallets that BOUGHT this token, with their earliest entry.
+ *
+ * Previously `smartEntries` was hardcoded to `[]`, so §15.5 could never see an
+ * entry even with a populated seed list — and `independent_smart_wallet_count`
+ * would have reported a *measured* 0 ("no smart money entered") when nothing
+ * had actually looked. On a component carrying 0.30 of the alpha weight that
+ * is precisely the null-vs-zero failure §15 exists to prevent.
+ *
+ * An empty seed list short-circuits without querying, so the features stay null
+ * for the right reason rather than by accident.
+ *
+ * Known approximation: `trades.wallet` is the swap recipient. For a routed
+ * swap that is the trader, but a contract that forwards tokens onward would be
+ * attributed the entry instead.
+ */
+export async function smartWalletEntries(
+  db: Database,
+  input: { poolId: string; seedWallets: ReadonlySet<string>; baseIsToken0: boolean },
+): Promise<Array<{ wallet: string; enteredAt: Date }>> {
+  if (input.seedWallets.size === 0) return [];
+
+  const buyMarker = input.baseIsToken0 ? 'OUT0' : 'OUT1';
+  const seeded = [...input.seedWallets].map((w) => w.toLowerCase());
+
+  // Query builder rather than raw sql``: the driver does not serialize a JS
+  // array into `= ANY(...)` and fails at bind time with "malformed array
+  // literal" — the same class of trap as passing a Date through a raw
+  // parameter, which broke every snapshot in Phase 2.
+  const rows = await db
+    .select({ wallet: trades.wallet, enteredAt: min(trades.occurredAt) })
+    .from(trades)
+    .where(
+      and(
+        eq(trades.poolId, input.poolId),
+        eq(trades.side, buyMarker),
+        inArray(trades.wallet, seeded),
+      ),
+    )
+    .groupBy(trades.wallet);
+
+  return rows
+    .filter((row): row is { wallet: string; enteredAt: Date } => row.enteredAt !== null)
+    .map((row) => ({ wallet: row.wallet, enteredAt: row.enteredAt }));
 }

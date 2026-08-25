@@ -12,6 +12,8 @@ import type { FeatureValue } from '@sdb/domain';
 
 /** Aggregates for one window, as produced by the SQL in `windows.ts`. */
 export type TradeWindow = {
+  /** Raw quote-token units traded in the window; null when no trades. */
+  quoteVolumeRaw: bigint | null;
   volumeUsd: number | null;
   buyCount: number;
   sellCount: number;
