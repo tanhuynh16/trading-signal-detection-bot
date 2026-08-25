@@ -38,6 +38,12 @@
       "path": "packages/feature-engine"
     },
     {
+      "path": "packages/scoring"
+    },
+    {
+      "path": "packages/signal-engine"
+    },
+    {
       "path": "apps/api"
     },
     {

@@ -46,6 +46,12 @@
     },
     {
       "path": "../../packages/holder-index"
+    },
+    {
+      "path": "../../packages/scoring"
+    },
+    {
+      "path": "../../packages/signal-engine"
     }
   ]
 }

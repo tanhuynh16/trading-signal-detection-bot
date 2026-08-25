@@ -83,12 +83,18 @@ importers:
       '@sdb/risk-engine':
         specifier: workspace:*
         version: link:../../packages/risk-engine
+      '@sdb/scoring':
+        specifier: workspace:*
+        version: link:../../packages/scoring
       '@sdb/security':
         specifier: workspace:*
         version: link:../../packages/providers/security
       '@sdb/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@sdb/signal-engine':
+        specifier: workspace:*
+        version: link:../../packages/signal-engine
       '@sdb/snapshot-engine':
         specifier: workspace:*
         version: link:../../packages/snapshot-engine
@@ -271,11 +277,44 @@ importers:
         specifier: ^2.22.4
         version: 2.55.19(typescript@5.9.3)(zod@3.25.76)
 
+  packages/scoring:
+    dependencies:
+      '@sdb/config':
+        specifier: workspace:*
+        version: link:../config
+      '@sdb/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@sdb/shared':
+        specifier: workspace:*
+        version: link:../shared
+
   packages/shared:
     dependencies:
       pino:
         specifier: ^9.6.0
         version: 9.14.0
+
+  packages/signal-engine:
+    dependencies:
+      '@sdb/config':
+        specifier: workspace:*
+        version: link:../config
+      '@sdb/database':
+        specifier: workspace:*
+        version: link:../database
+      '@sdb/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@sdb/scoring':
+        specifier: workspace:*
+        version: link:../scoring
+      '@sdb/shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: ^0.38.3
+        version: 0.38.4(postgres@3.4.9)
 
   packages/snapshot-engine:
     dependencies:

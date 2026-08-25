@@ -20,6 +20,12 @@ export const strategyConfigSchema = z.object({
     inactiveExpiryMinutes: z.number().positive(),
     /** Spec §13: stop tracking once a pool has been unreadable this long. */
     poolUnavailableExpiryMinutes: z.number().positive().default(10),
+    /**
+     * §18 "liquidity collapse": liquidity below this fraction of the pool's own
+     * peak. Relative rather than absolute, because a pool that never held much
+     * has not collapsed — it was always thin.
+     */
+    liquidityCollapseFraction: z.number().min(0).max(1).default(0.2),
   }),
 
   momentum: z.object({
@@ -139,7 +145,11 @@ export function parseStrategyConfig(input: unknown): StrategyConfig {
 export const BASE_MEME_V1: StrategyConfig = parseStrategyConfig({
   strategyVersion: 'base-meme-v1',
   discovery: { minLiquidityUsd: 10000, maxTokenAgeMinutes: 360 },
-  tracking: { inactiveExpiryMinutes: 30, poolUnavailableExpiryMinutes: 10 },
+  tracking: {
+    inactiveExpiryMinutes: 30,
+    poolUnavailableExpiryMinutes: 10,
+    liquidityCollapseFraction: 0.2,
+  },
   momentum: { minVolumeAcceleration: 3.0, minUniqueBuyers5m: 20, minBuySellRatio: 1.2 },
   smartMoney: { minIndependentWallets: 2, seedWallets: [] },
   clustering: { timeProximityMs: 300_000, amountTolerance: 0.05, minClusterSize: 2 },

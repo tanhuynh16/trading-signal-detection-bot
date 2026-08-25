@@ -23,6 +23,8 @@
     "@sdb/risk-engine": "workspace:*",
     "@sdb/security": "workspace:*",
     "@sdb/feature-engine": "workspace:*",
-    "@sdb/holder-index": "workspace:*"
+    "@sdb/holder-index": "workspace:*",
+    "@sdb/scoring": "workspace:*",
+    "@sdb/signal-engine": "workspace:*"
   }
 }

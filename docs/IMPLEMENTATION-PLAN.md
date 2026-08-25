@@ -16,7 +16,7 @@ gap resolutions below by their G-numbers.
 | 4a | Features: liquidity, momentum | **done** |
 | 4b | Features: holders, clustering, smart money | **done** |
 | R | Replay/backfill harness (cross-cutting, alongside Phase 4) | not started |
-| 5 | Normalization, scoring, signal state machine | not started |
+| 5 | Normalization, scoring, signal state machine | **done** |
 | 6 | Telegram | not started |
 | 7 | Outcome tracking | not started |
 | 8 | Strategy evaluation | not started |
@@ -257,7 +257,7 @@ Not in the spec, and the highest-leverage addition. Every threshold in §19 is a
 admitted hypothesis; without replay, each tuning iteration costs weeks of live
 traffic. It also produces the fixture corpus Phases 5–8 need.
 
-### Phase 5 — Normalization, scoring, signals (§16–§19)
+### Phase 5 — Normalization, scoring, signals (§16–§19) ✅
 Reusable normalizers (min-max with clipping, log transform, bounded ratio) whose
 parameters live in versioned strategy config. Component scorers returning
 `0..100` or null, aggregated per **G1**, with the breakdown persisted. The §18
@@ -266,8 +266,20 @@ state machine: `NEW → WATCHING → INTERESTING → STRONG_SIGNAL`, any state �
 unless `downgradePolicyEnabled`. All transitions persisted. Alert dedupe: one per
 level per token unless the score moves past `rescoreDelta` or the cooldown expires.
 
-*Accepted when:* identical inputs and config version produce identical
-transitions (§27); a config change mints a new version and rewrites no history.
+*Accepted:* verified live over 19 minutes — 30 tokens reached WATCHING, 3
+reached INTERESTING, 2 expired on liquidity collapse, with a genuine score
+distribution rather than a degenerate one. Coverage measured at exactly 0.700
+(smartMoney null), above `minCoverage`, so STRONG_SIGNAL stays reachable —
+plan G1 working as designed.
+
+The feature→component mapping follows §15's own structure, with §15.4
+`cluster_concentration` as the §17 penalty since it belongs to no component
+([ADR 0015](adr/0015-scoring-and-state-machine.md)). Renormalisation runs at
+both the feature and component level; the inner level is load-bearing because
+`volume_acceleration_5m` is null for the first ~20 minutes of every token.
+
+Invariants verified: no signal under a risk FAIL carries an alert level (§27),
+no duplicate rows per token+state, 35 signals with 35 transitions.
 
 ### Phase 6 — Telegram (§20)
 The §20 message format: symbol, CA, age, MC, liquidity, score, "Why" breakdown,

@@ -7,6 +7,7 @@ import { DiscoveryRunner } from '@sdb/discovery';
 import { QuotePriceResolver } from '@sdb/market-data';
 import { GoPlusSecurityProvider } from '@sdb/security';
 import { DEFAULT_RULE_CONFIG } from '@sdb/risk-engine';
+import { DEFAULT_COMPONENTS, DEFAULT_PENALTIES } from '@sdb/scoring';
 import { SwapTail } from '@sdb/snapshot-engine';
 import { TransferTail } from '@sdb/holder-index';
 import { startProcessors } from './processors.js';
@@ -151,6 +152,29 @@ const workers = startProcessors({
             },
           }
         : null,
+    },
+    // §17 scoring. Weights and thresholds come from strategy config so a
+    // change mints a new strategyVersion rather than reinterpreting history.
+    scoring: {
+      weights: strategy.scoring.weights,
+      nullPolicy: strategy.scoring.nullPolicy,
+      minCoverage: strategy.scoring.minCoverage,
+      strategyVersion: strategy.strategyVersion,
+      components: DEFAULT_COMPONENTS,
+      penalties: DEFAULT_PENALTIES,
+    },
+    // §18 state machine.
+    transitions: {
+      interestingThreshold: strategy.scoring.interestingThreshold,
+      strongThreshold: strategy.scoring.strongThreshold,
+      downgradePolicyEnabled: strategy.alerts.downgradePolicyEnabled,
+      maxTokenAgeMinutes: strategy.discovery.maxTokenAgeMinutes,
+      inactiveExpiryMinutes: strategy.tracking.inactiveExpiryMinutes,
+      liquidityCollapseFraction: strategy.tracking.liquidityCollapseFraction,
+    },
+    dedupe: {
+      rescoreDelta: strategy.alerts.rescoreDelta,
+      cooldownMinutes: strategy.alerts.cooldownMinutes,
     },
   },
 });

@@ -18,6 +18,8 @@ import {
   persistFeatures,
   type FeatureConfig,
 } from '@sdb/feature-engine';
+import { evaluateSignal, type DedupeConfig, type TransitionConfig } from '@sdb/signal-engine';
+import type { ScoringConfig } from '@sdb/scoring';
 import { isRetryable, withContext, type Logger } from '@sdb/shared';
 import type { GoPlusSecurityProvider } from '@sdb/security';
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES, jobId } from './queues.js';
@@ -38,6 +40,9 @@ export type ProcessorDeps = {
     riskOffsets: readonly string[];
     riskProbeWei: bigint;
     features: FeatureConfig;
+    scoring: ScoringConfig;
+    transitions: TransitionConfig;
+    dedupe: DedupeConfig;
   };
 };
 
@@ -285,7 +290,8 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
       await persistFeatures(deps.db, features);
 
       const { measured, total } = coverage(features.values);
-      withContext(logger, { correlationId: poolId, poolId }).info(
+      const log = withContext(logger, { correlationId: poolId, poolId });
+      log.info(
         {
           offset,
           measured,
@@ -298,6 +304,34 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
         },
         'features calculated',
       );
+
+      // §17/§18: score and advance the state machine off the features we just
+      // wrote. Pure computation over Postgres — no RPC, so this is cheap enough
+      // to run after every snapshot.
+      const signal = await evaluateSignal(
+        {
+          db: deps.db,
+          logger: deps.logger,
+          scoring: deps.config.scoring,
+          transitions: deps.config.transitions,
+          dedupe: deps.config.dedupe,
+        },
+        poolId,
+      );
+
+      if (signal?.changed) {
+        log.info(
+          {
+            from: signal.fromState,
+            to: signal.toState,
+            reason: signal.reason,
+            alphaScore: Number(signal.alphaScore.toFixed(2)),
+            coverage: Number(signal.coverage.toFixed(3)),
+            alertLevel: signal.alertLevel,
+          },
+          'signal state changed',
+        );
+      }
     }),
     { connection, concurrency: 4 },
   );

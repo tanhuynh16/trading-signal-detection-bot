@@ -22,7 +22,7 @@ repository deviates, the reason is in [`docs/adr/`](docs/adr/).
 | 2     | Snapshot pipeline                                                | **done**    |
 | 3     | Risk engine                                                      | **done**    |
 | 4     | Features (liquidity, momentum, holders, clustering, smart money) | **done**    |
-| 5     | Normalization, scoring, signal state machine                     | not started |
+| 5     | Normalization, scoring, signal state machine                     | **done**    |
 | 6     | Telegram                                                         | not started |
 | 7     | Outcome tracking                                                 | not started |
 | 8     | Strategy evaluation                                              | not started |
