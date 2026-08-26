@@ -338,6 +338,14 @@ export const signalOutcomes = pgTable(
     returnPct: numeric('return_pct', { precision: 20, scale: 6 }),
     maxRunupPct: numeric('max_runup_pct', { precision: 20, scale: 6 }),
     maxDrawdownPct: numeric('max_drawdown_pct', { precision: 20, scale: 6 }),
+    /**
+     * How many trades formed the price path.
+     *
+     * Zero is a real answer, not a failure: no trade means no price discovery,
+     * so the last known price stands and the return is 0. §22 needs to tell
+     * that apart from a genuinely flat result, and only this column can.
+     */
+    tradeCount: integer('trade_count'),
     /** Spec §27: unavailable provider data is recorded, not silently skipped. */
     failureReason: text('failure_reason'),
     createdAt: createdAt(),
@@ -424,6 +432,34 @@ export const notifierCircuit = pgTable('notifier_circuit', {
   lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Historical USD price of the quote assets (§21).
+ *
+ * Outcome returns are denominated in USD, so converting a price path needs the
+ * quote token's USD price *as it was at each point* — not one spot rate applied
+ * to a 24-hour window, which would let an ETH move contaminate every return and
+ * scale the runup and drawdown extrema by the wrong factor.
+ *
+ * The resolver already refreshes WETH/USD on a TTL, so persisting each refresh
+ * builds the series at zero additional RPC cost. Stablecoins are a constant and
+ * are never sampled.
+ */
+export const quotePriceSamples = pgTable(
+  'quote_price_samples',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    chainId: integer('chain_id').notNull(),
+    tokenAddress: text('token_address').notNull(),
+    priceUsd: usd('price_usd').notNull(),
+    /** When the price held, distinct from when the row was written (§3). */
+    observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => ({
+    lookupIdx: index('quote_price_samples_token_time_idx').on(t.tokenAddress, t.observedAt),
+  }),
+);
 
 /** Spec §23: permanent failures land here rather than retrying forever. */
 export const jobsAudit = pgTable(

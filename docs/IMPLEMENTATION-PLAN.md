@@ -338,14 +338,40 @@ with zero `FAILED`, one `circuit_open` audit row; after a Redis flush the
 circuit was still `OPEN`, and restoring the chat id let a probe close it and
 drain the held backlog.
 
-### Phase 7 — Outcome tracking (§21)
-Horizon jobs at 1m/5m/15m/30m/1h/4h/24h on the same durable scheduler as
-snapshots. `return_pct`, `max_runup_pct`, `max_drawdown_pct` from the
-reconstructed price path per **G2**. Signal-time reference price frozen at
-emission; features and `strategyVersion` immutable thereafter.
+### Phase 7 — Outcome tracking (§21) ✅
+Horizon jobs at 1m/5m/15m/30m/1h/4h/24h. `return_pct`, `max_runup_pct`,
+`max_drawdown_pct` from the price path reconstructed out of already-indexed
+`trades` — **no horizon job makes an RPC call**, which is what makes a 24h
+horizon affordable at all. The signal-time reference price is frozen at
+emission and never updated.
 
-*Accepted when:* every alert has outcome rows at all horizons, or an explicitly
-recorded failure when provider data was unavailable (§27).
+Three things had to change first. `trades.price_usd` was `NULL` on every row, so
+there was no stored path to read. The swap tail stopped indexing a pool at 6h,
+so the 24h horizon had no data — signalled pools now stay in the tail for 25h,
+which costs almost nothing since the same block ranges are already scanned. And
+ADR 0004's plan to `eth_getLogs` the window at horizon time turned out to cost
+~4,300 requests per pool at the measured 10-block cap; ADR 0019 supersedes it.
+
+Every non-`EXPIRED` state entry is measured, not just alerted signals: §22 has
+to be able to ask whether the score predicts anything at all, and that needs the
+low-score control group.
+
+USD comes from a persisted quote-price series (`quote_price_samples`) rather
+than one spot rate, so a 24h path is priced at the ETH rate that actually held
+at each point. Past the sample tolerance a trade is left unpriced and the
+outcome records a reason rather than a number (§27).
+
+Durability is the reconciler, not Redis — a 24h BullMQ delay does not survive a
+`FLUSHALL`, so a sweep rebuilds due horizons from the `signals` table.
+
+The live run found a precision defect the tests had not: pricing a swap as
+`toUsd(div(quote, base), rate)` truncates the intermediate to 18 decimals, which
+on a real token left **four significant digits**, and silently discarded any
+token under ~$2.5e-15 — precisely where meme tokens live. Multiplying before
+dividing fixes both (ADR 0019).
+
+*Accepted when:* every non-expired signal has outcome rows at all elapsed
+horizons, or an explicitly recorded failure when data was unavailable (§27).
 
 ### Phase 8 — Evaluation (§22)
 Outcomes by score band, per-feature and combination contribution, win rate,

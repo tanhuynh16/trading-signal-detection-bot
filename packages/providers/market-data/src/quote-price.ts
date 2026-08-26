@@ -27,6 +27,14 @@ export type QuoteTokenConfig = {
   referencePool: Address;
   /** Cache lifetime. ETH moves slowly relative to a 30s snapshot cadence. */
   ttlMs: number;
+  /**
+   * Called on each successful refresh so §21 can persist a historical curve.
+   *
+   * A callback rather than a database handle: this package resolves prices and
+   * knows nothing about storage, and a refresh must never fail because a write
+   * did. Errors are swallowed at the call site for that reason.
+   */
+  onSample?: (sample: { tokenAddress: string; priceUsd: bigint }) => void;
 };
 
 export class QuotePriceResolver {
@@ -107,11 +115,28 @@ export class QuotePriceResolver {
 
       this.cachedWethUsd = wethUsd;
       this.cachedAt = Date.now();
+      this.emitSample(this.config.weth, wethUsd);
       return wethUsd;
     } catch {
       // A failed refresh serves the last good value rather than nulling every
       // snapshot in flight; staleness is bounded by how often this is called.
       return this.cachedWethUsd;
+    }
+  }
+
+  /**
+   * Is this quote asset pegged, and therefore priceable historically without a
+   * sample series? Stablecoins are $1 at every point in the past as well as now.
+   */
+  fixedUsdFor(tokenAddress: string): bigint | null {
+    return this.config.stablecoins.includes(tokenAddress.toLowerCase()) ? ONE_USD : null;
+  }
+
+  private emitSample(tokenAddress: string, priceUsd: bigint): void {
+    try {
+      this.config.onSample?.({ tokenAddress, priceUsd });
+    } catch {
+      // Recording history must never break the price path that produced it.
     }
   }
 

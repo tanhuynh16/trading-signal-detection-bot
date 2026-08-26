@@ -51,6 +51,25 @@ const envSchema = z.object({
   NOTIFIER_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().positive().default(3),
   NOTIFIER_CIRCUIT_OPEN_MS: z.coerce.number().int().positive().default(300_000),
 
+  // Spec §21 outcome tracking.
+  OUTCOME_TRACKING_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  /**
+   * The reconciler, not Redis, is what makes a 24h horizon durable — a delayed
+   * BullMQ job does not survive a FLUSHALL.
+   */
+  OUTCOME_RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
+  OUTCOME_RECONCILE_LOOKBACK_HOURS: z.coerce.number().int().positive().default(48),
+  OUTCOME_RECONCILE_LIMIT: z.coerce.number().int().positive().default(200),
+  /**
+   * How long a signalled pool keeps being indexed by the swap tail. Must exceed
+   * the longest horizon (24h) or that horizon has no trades to measure.
+   */
+  OUTCOME_TAIL_RETENTION_HOURS: z.coerce.number().int().positive().default(25),
+  /** How far a quote-price sample may sit from a trade before it is unusable. */
+  QUOTE_SAMPLE_MAX_AGE_MS: z.coerce.number().int().positive().default(300_000),
+  /** Fraction of a path's swaps that must be priceable to report a number. */
+  OUTCOME_MIN_QUOTE_COVERAGE: z.coerce.number().min(0).max(1).default(0.8),
+
   // Spec §10.2: replay overlap so a restart cannot skip blocks.
   DISCOVERY_BLOCK_OVERLAP: z.coerce.number().int().nonnegative().default(50),
 

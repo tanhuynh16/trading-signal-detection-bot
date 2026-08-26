@@ -1,0 +1,25 @@
+{
+  "name": "@sdb/outcome-tracker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@sdb/database": "workspace:*",
+    "@sdb/domain": "workspace:*",
+    "@sdb/market-data": "workspace:*",
+    "@sdb/shared": "workspace:*",
+    "drizzle-orm": "^0.38.3"
+  },
+  "devDependencies": {
+    "@sdb/snapshot-engine": "workspace:*",
+    "viem": "^2.21.55"
+  }
+}

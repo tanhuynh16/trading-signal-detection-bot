@@ -55,6 +55,9 @@
     },
     {
       "path": "../../packages/notifications"
+    },
+    {
+      "path": "../../packages/outcome-tracker"
     }
   ]
 }

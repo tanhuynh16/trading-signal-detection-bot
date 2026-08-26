@@ -1,8 +1,8 @@
-import { and, eq, gte, sql } from 'drizzle-orm';
+import { and, eq, exists, gte, ne, or, sql } from 'drizzle-orm';
 import type { Log, PublicClient } from 'viem';
 import { AdaptiveChunkSize, fetchLogsChunked } from '@sdb/blockchain';
 import { advanceCursor, planRange, readCursor } from '@sdb/discovery';
-import { pools, trades, type Database } from '@sdb/database';
+import { pools, signals, trades, type Database } from '@sdb/database';
 import { decodeSwapLog, SWAP_TOPICS } from '@sdb/market-data';
 import { fromUnixSeconds, withContext, type Address, type Logger } from '@sdb/shared';
 
@@ -27,6 +27,16 @@ export type SwapTailConfig = {
   maxTokenAgeMinutes: number;
   /** Cap on addresses per eth_getLogs call; the list is batched to fit. */
   maxAddressesPerQuery: number;
+  /**
+   * Keep indexing a pool this long after it produced a signal (§21).
+   *
+   * The 24h outcome horizon needs trades that `maxTokenAgeMinutes` (6h) would
+   * have stopped collecting. Backfilling at horizon time is not an option: at
+   * the measured 10-block eth_getLogs cap, 24h of one pool is ~4,300 requests.
+   * Staying in the tail costs no extra requests at all — the same block ranges
+   * are already being scanned, the filter just carries more addresses.
+   */
+  outcomeRetentionHours: number;
 };
 
 export type SwapTailDeps = {
@@ -37,19 +47,45 @@ export type SwapTailDeps = {
 };
 
 /**
- * Pools still worth watching: discovered recently enough to matter, and not
- * expired. Recomputed each drain so newly discovered pools join automatically
- * and stale ones drop out without bookkeeping.
+ * Pools still worth watching: discovered recently enough to matter, or still
+ * owed outcome measurements. Recomputed each drain so newly discovered pools
+ * join automatically and stale ones drop out without bookkeeping.
+ *
+ * The second clause is what makes §21's 24h horizon measurable. A pool whose
+ * discovery window has closed stays indexed while any non-expired signal on it
+ * is younger than the retention, because that signal's price path is still
+ * being written.
  */
 export async function trackedPools(
   db: Database,
-  config: { chainId: number; maxTokenAgeMinutes: number },
+  config: { chainId: number; maxTokenAgeMinutes: number; outcomeRetentionHours: number },
 ): Promise<Array<{ id: string; address: Address; dex: string; tokenId: string }>> {
-  const cutoff = new Date(Date.now() - config.maxTokenAgeMinutes * 60_000);
+  const discoveryCutoff = new Date(Date.now() - config.maxTokenAgeMinutes * 60_000);
+  const outcomeCutoff = new Date(Date.now() - config.outcomeRetentionHours * 3_600_000);
+
   const rows = await db
     .select({ id: pools.id, address: pools.address, dex: pools.dex, tokenId: pools.tokenId })
     .from(pools)
-    .where(and(eq(pools.chainId, config.chainId), gte(pools.discoveredAt, cutoff)));
+    .where(
+      and(
+        eq(pools.chainId, config.chainId),
+        or(
+          gte(pools.discoveredAt, discoveryCutoff),
+          exists(
+            db
+              .select({ one: signals.id })
+              .from(signals)
+              .where(
+                and(
+                  eq(signals.poolId, pools.id),
+                  ne(signals.state, 'EXPIRED'),
+                  gte(signals.createdAt, outcomeCutoff),
+                ),
+              ),
+          ),
+        ),
+      ),
+    );
   return rows as Array<{ id: string; address: Address; dex: string; tokenId: string }>;
 }
 
@@ -200,7 +236,21 @@ export class SwapTail {
         );
       }
 
-      if (total > 0) logger.info({ swaps: total, pools: tracked.length }, 'swap tail ingested');
+      // Outcome retention (§21) keeps pools in the filter long after discovery,
+      // and each batch past the first is a real extra request per block chunk.
+      // Log it so that cost is measurable rather than inferred.
+      if (batches.length > 1) {
+        logger.warn(
+          { pools: tracked.length, batches: batches.length, maxPerQuery: this.deps.config.maxAddressesPerQuery },
+          'tracked pool count exceeds one eth_getLogs filter; requests per chunk multiplied',
+        );
+      }
+      if (total > 0) {
+        logger.info(
+          { swaps: total, pools: tracked.length, batches: batches.length },
+          'swap tail ingested',
+        );
+      }
       return { swaps: total };
     } finally {
       this.draining = false;

@@ -9,6 +9,7 @@ import { GoPlusSecurityProvider } from '@sdb/security';
 import { DEFAULT_RULE_CONFIG } from '@sdb/risk-engine';
 import { DEFAULT_COMPONENTS, DEFAULT_PENALTIES } from '@sdb/scoring';
 import { pendingAlerts, TelegramNotifier, type Notifier } from '@sdb/notifications';
+import { dueOutcomes, recordQuoteSample } from '@sdb/outcome-tracker';
 import { SwapTail } from '@sdb/snapshot-engine';
 import { TransferTail } from '@sdb/holder-index';
 import { startProcessors } from './processors.js';
@@ -67,6 +68,24 @@ const quotePrices = new QuotePriceResolver(chain.http, {
   weth: WETH,
   referencePool: env.WETH_USD_REFERENCE_POOL as `0x${string}`,
   ttlMs: env.QUOTE_PRICE_TTL_MS,
+  // §21: every refresh becomes a point on the historical ETH/USD curve, at no
+  // extra RPC cost. Outcomes need the rate that held at each point in a 24h
+  // window; one spot rate applied to the whole path would let an ETH move
+  // contaminate every return. Fire-and-forget — a failed sample must never
+  // fail the snapshot that triggered it.
+  onSample: ({ tokenAddress, priceUsd }) => {
+    if (!env.OUTCOME_TRACKING_ENABLED) return;
+    void recordQuoteSample(db, {
+      chainId: env.BASE_CHAIN_ID,
+      tokenAddress,
+      priceUsd,
+    }).catch((error: unknown) => {
+      logger.warn(
+        { err: error instanceof Error ? error.message : String(error) },
+        'failed to record quote price sample; outcome coverage may gap',
+      );
+    });
+  },
 });
 
 // One global tail ingests Swap logs for every tracked pool in a single query
@@ -80,6 +99,9 @@ const swapTail = new SwapTail({
     logChunkBlocks: env.DISCOVERY_LOG_CHUNK_BLOCKS,
     maxTokenAgeMinutes: strategy.discovery.maxTokenAgeMinutes,
     maxAddressesPerQuery: env.SWAP_TAIL_MAX_ADDRESSES,
+    // §21: a signalled pool keeps being indexed past its discovery window, or
+    // the 24h horizon has no trades to measure.
+    outcomeRetentionHours: env.OUTCOME_TAIL_RETENTION_HOURS,
   },
 });
 
@@ -154,6 +176,12 @@ const workers = startProcessors({
       enabled: env.NOTIFIER_CIRCUIT_ENABLED,
       failureThreshold: env.NOTIFIER_CIRCUIT_FAILURE_THRESHOLD,
       openDurationMs: env.NOTIFIER_CIRCUIT_OPEN_MS,
+    },
+    // §21 outcome measurement.
+    outcome: {
+      enabled: env.OUTCOME_TRACKING_ENABLED,
+      minQuoteCoverage: env.OUTCOME_MIN_QUOTE_COVERAGE,
+      maxSampleAgeMs: env.QUOTE_SAMPLE_MAX_AGE_MS,
     },
     features: {
       holders: {
@@ -231,6 +259,7 @@ const discovery = new DiscoveryRunner({
 
 async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, 'shutting down worker');
+  if (outcomeTimer) clearInterval(outcomeTimer);
   await discovery.stop();
   await Promise.all(workers.map((worker) => worker.close()));
   await Promise.all(Object.values(queues).map((queue) => queue.close()));
@@ -289,6 +318,50 @@ if (orphaned.length > 0) {
     ),
   );
   logger.info({ count: orphaned.length }, 'requeued pending alerts from a previous run');
+}
+
+/**
+ * Requeue outcome horizons that came due while nothing was listening.
+ *
+ * §21 requires the same durable scheduling as snapshots, but a 24h BullMQ delay
+ * lives in Redis, and Phase 6.1 settled that a long-lived obligation cannot
+ * live only there — a restart is survivable, a FLUSHALL is not. The durable
+ * `signals` rows are the source of truth; the queue is rebuilt from them.
+ *
+ * Job IDs are keyed on signal + horizon, so requeueing something still delayed
+ * is a no-op rather than a double evaluation.
+ */
+async function reconcileOutcomes(): Promise<void> {
+  try {
+    const due = await dueOutcomes(db, {
+      lookbackMs: env.OUTCOME_RECONCILE_LOOKBACK_HOURS * 3_600_000,
+      limitPerHorizon: env.OUTCOME_RECONCILE_LIMIT,
+    });
+    if (due.length === 0) return;
+
+    await Promise.all(
+      due.map((item) =>
+        queues[QUEUE_NAMES.outcome]!.add(
+          'evaluate',
+          { signalId: item.signalId, horizon: item.horizon },
+          { ...DEFAULT_JOB_OPTIONS, jobId: jobId.outcome(item.signalId, item.horizon) },
+        ),
+      ),
+    );
+    logger.info({ count: due.length }, 'requeued outcome horizons that came due');
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error) },
+      'outcome reconciliation failed; will retry on the next tick',
+    );
+  }
+}
+
+let outcomeTimer: NodeJS.Timeout | null = null;
+if (env.OUTCOME_TRACKING_ENABLED) {
+  await reconcileOutcomes();
+  outcomeTimer = setInterval(() => void reconcileOutcomes(), env.OUTCOME_RECONCILE_INTERVAL_MS);
+  outcomeTimer.unref();
 }
 
 await discovery.start();

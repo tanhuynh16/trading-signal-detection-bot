@@ -12,6 +12,7 @@ import {
   shouldStopTracking,
 } from '@sdb/snapshot-engine';
 import { evaluateRisk, persistRisk, type RiskRuleConfig } from '@sdb/risk-engine';
+import { evaluateOutcome, planOutcomes, type OutcomeConfig } from '@sdb/outcome-tracker';
 import {
   calculateFeatures,
   coverage,
@@ -57,6 +58,7 @@ export type ProcessorDeps = {
     riskOffsets: readonly string[];
     riskProbeWei: bigint;
     circuit: CircuitConfig;
+    outcome: OutcomeConfig & { enabled: boolean };
     features: FeatureConfig;
     scoring: ScoringConfig;
     transitions: TransitionConfig;
@@ -351,6 +353,33 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
         );
       }
 
+      // §21: a new state entry freezes a reference price, so start measuring
+      // against it. All seven horizons are enqueued at once — §13 forbids jobs
+      // that schedule more jobs, and for a 24h horizon a broken chain would go
+      // unnoticed for a day. EXPIRED is skipped: the return of an expiry event
+      // measures nothing.
+      if (
+        deps.config.outcome.enabled &&
+        signal?.changed &&
+        signal.signalId &&
+        signal.toState !== 'EXPIRED'
+      ) {
+        const signalId = signal.signalId;
+        await Promise.all(
+          planOutcomes().map((plan) =>
+            queues[QUEUE_NAMES.outcome]!.add(
+              'evaluate',
+              { signalId, horizon: plan.horizon },
+              {
+                ...DEFAULT_JOB_OPTIONS,
+                delay: plan.delayMs,
+                jobId: jobId.outcome(signalId, plan.horizon),
+              },
+            ),
+          ),
+        );
+      }
+
       if (signal?.changed) {
         log.info(
           {
@@ -471,6 +500,40 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
   );
 
   /**
+   * outcome: measure one signal at one horizon (§21).
+   *
+   * Reads only Postgres — the price path comes from trades the global tail has
+   * already indexed — so concurrency costs no provider budget.
+   */
+  const outcomeWorker = new Worker(
+    QUEUE_NAMES.outcome,
+    guarded(deps, QUEUE_NAMES.outcome, async (job) => {
+      const { signalId, horizon } = job.data as { signalId: string; horizon: string };
+      const log = withContext(logger, { correlationId: signalId });
+
+      const result = await evaluateOutcome(deps.db, deps.quotePrices, deps.config.outcome, {
+        signalId,
+        horizon,
+      });
+
+      log.info(
+        {
+          signalId,
+          horizon,
+          created: result.created,
+          returnPct: result.metrics.returnPct,
+          maxRunupPct: result.metrics.maxRunupPct,
+          maxDrawdownPct: result.metrics.maxDrawdownPct,
+          trades: result.metrics.tradeCount,
+          failureReason: result.metrics.failureReason,
+        },
+        result.created ? 'outcome recorded' : 'outcome already existed',
+      );
+    }),
+    { connection, concurrency: 2 },
+  );
+
+  /**
    * §20: "Failure to send Telegram must not discard the signal." Once bounded
    * retries are exhausted the alert is marked FAILED — and Phase 5.1's dedup
    * counts only SENT/PENDING, so the token becomes eligible to alert again
@@ -502,7 +565,14 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
     });
   }
 
-  return [discoveryWorker, snapshotWorker, riskWorker, featureWorker, notificationWorker];
+  return [
+    discoveryWorker,
+    snapshotWorker,
+    riskWorker,
+    featureWorker,
+    notificationWorker,
+    outcomeWorker,
+  ];
 }
 
 /** Cancel a pool's not-yet-due snapshot jobs. */

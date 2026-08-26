@@ -1,6 +1,13 @@
 # ADR 0004 — Reconstruct outcome price paths from Swap logs
 
-**Status:** accepted (Phase 0 schema, implemented Phase 7)
+**Status:** superseded by [ADR 0019](0019-outcome-measurement-from-indexed-trades.md) (Phase 7)
+
+> Superseded on implementation. This was written in Phase 0, before the global
+> Swap tail (ADR 0008) existed and before the provider's 10-block `eth_getLogs`
+> cap was measured. Fetching the window at horizon time turns out to cost ~4,300
+> requests for a single pool's 24 hours; reading the tail's already-indexed
+> trades costs none. The reasoning below about exact extrema still holds — only
+> the source of the logs changed.
 
 ## Context
 

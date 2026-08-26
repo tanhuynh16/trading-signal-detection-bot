@@ -47,6 +47,9 @@
       "path": "packages/notifications"
     },
     {
+      "path": "packages/outcome-tracker"
+    },
+    {
       "path": "apps/api"
     },
     {
