@@ -17,7 +17,8 @@
     "db:generate": "pnpm --filter @sdb/database generate",
     "db:migrate": "pnpm --filter @sdb/database migrate",
     "dev:api": "pnpm --filter @sdb/api dev",
-    "dev:worker": "pnpm --filter @sdb/worker dev"
+    "dev:worker": "pnpm --filter @sdb/worker dev",
+    "evaluate": "pnpm --filter @sdb/evaluation report"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",

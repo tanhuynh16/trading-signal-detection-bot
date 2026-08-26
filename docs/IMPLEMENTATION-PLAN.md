@@ -373,11 +373,29 @@ dividing fixes both (ADR 0019).
 *Accepted when:* every non-expired signal has outcome rows at all elapsed
 horizons, or an explicitly recorded failure when data was unavailable (§27).
 
-### Phase 8 — Evaluation (§22)
-Outcomes by score band, per-feature and combination contribution, win rate,
-mean and median return, return distribution, max drawdown and runup. **Report
-the distribution, not just the mean** — §22 warns that meme outcomes are heavily
-skewed. Every strategy change mints a new `strategyVersion`.
+### Phase 8 — Evaluation (§22) ✅
+`pnpm evaluate` reports outcomes by score band and horizon, feature contribution,
+win rate, return distribution, runup, drawdown and profit factor — read-only over
+immutable history, so the same data always yields the same report.
+
+The design constraint is §22's own warning about skew. A cell below `--min-n`
+(default 30 measured outcomes) prints **INSUFFICIENT in place of its metrics**,
+not beside them: a number shown next to a caveat is still read as a number. The
+median leads and the mean never appears without p10/p90. Win rate carries a
+Wilson interval, which stays wide at small n where a normal approximation would
+collapse to false certainty. Feature contribution is Spearman rank correlation,
+so one 40x cannot make an unrelated feature look predictive, and a null component
+is dropped rather than scored 0 (§15). `n` is reported beside distinct token
+count, because outcomes from one token are correlated. Strategy versions are
+never pooled.
+
+Profit factor needs a trade rule and none exists (§28), so exactly one convention
+is declared and printed every run: notional entry at the frozen signal price,
+exit at the horizon price.
+
+**The report currently says INSUFFICIENT almost everywhere** — the whole sample
+sits below score 61 with 10–25 outcomes per horizon and no STRONG signals. That
+is the correct answer, and saying it plainly is the point (ADR 0021).
 
 ### Cross-cutting
 Built into each phase, not deferred: the six §23 queues with idempotent job IDs,

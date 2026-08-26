@@ -27,7 +27,7 @@ repository deviates, the reason is in [`docs/adr/`](docs/adr/).
 | 6.1   | Notification failure hardening (circuit breaker)                 | **done**    |
 | 7     | Outcome tracking                                                 | **done**    |
 | 7.1   | Outcome coverage gate + self-healing repair                      | **done**    |
-| 8     | Strategy evaluation                                              | not started |
+| 8     | Strategy evaluation                                              | **done**    |
 
 Per spec §29, phases land one at a time with review in between. Full detail in
 [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
@@ -50,9 +50,18 @@ docker compose up -d postgres redis
 pnpm --filter @sdb/database migrate
 ```
 
+The integration tests truncate the tables the pipeline writes to, so they run
+against a database of their own rather than the one a worker is using:
+
+```bash
+docker compose exec postgres psql -U sdb -d postgres -c 'CREATE DATABASE sdb_test OWNER sdb;'
+DATABASE_URL=postgres://sdb:sdb@localhost:5432/sdb_test pnpm --filter @sdb/database migrate
+```
+
 ## Running
 
 ```bash
+pnpm evaluate       # §22 strategy evaluation report
 pnpm dev:api        # health/ready on :3000
 pnpm dev:worker     # queue host
 docker compose up   # or the whole stack

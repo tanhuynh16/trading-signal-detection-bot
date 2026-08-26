@@ -50,6 +50,9 @@
       "path": "packages/outcome-tracker"
     },
     {
+      "path": "packages/evaluation"
+    },
+    {
       "path": "apps/api"
     },
     {

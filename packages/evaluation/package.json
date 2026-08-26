@@ -1,0 +1,22 @@
+{
+  "name": "@sdb/evaluation",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "scripts": {
+    "report": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@sdb/config": "workspace:*",
+    "@sdb/database": "workspace:*",
+    "@sdb/domain": "workspace:*",
+    "@sdb/shared": "workspace:*",
+    "drizzle-orm": "^0.38.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}
