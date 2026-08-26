@@ -83,6 +83,15 @@ export const pools = pgTable(
 export const discoveryCursors = pgTable('discovery_cursors', {
   source: text('source').primaryKey(),
   lastProcessedBlock: bigint('last_processed_block', { mode: 'bigint' }).notNull(),
+  /**
+   * Block time of the watermark, not wall time (§21).
+   *
+   * The cursor is a block NUMBER, but an outcome window is a time range, so
+   * nothing could ask "has ingestion covered this instant?" without a mapping.
+   * Only the swap tail populates this — the factories and transfer-tail leave
+   * it null, since no consumer needs their coverage in time terms.
+   */
+  lastProcessedBlockTime: timestamp('last_processed_block_time', { withTimezone: true }),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -348,6 +357,16 @@ export const signalOutcomes = pgTable(
     tradeCount: integer('trade_count'),
     /** Spec §27: unavailable provider data is recorded, not silently skipped. */
     failureReason: text('failure_reason'),
+    /**
+     * How many times this measurement has been corrected.
+     *
+     * §21 immutability protects against strategy rewrites, not against
+     * repairing a measurement taken before the trade history was complete. A
+     * correction that overwrote silently would be indistinguishable from the
+     * original reading, so every repair increments this and moves
+     * `evaluated_at`.
+     */
+    revision: integer('revision').notNull().default(0),
     createdAt: createdAt(),
   },
   (t) => ({

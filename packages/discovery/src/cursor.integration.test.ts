@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { sql } from 'drizzle-orm';
+import { inArray } from 'drizzle-orm';
 import { createDatabase, discoveryCursors } from '@sdb/database';
 import { advanceCursor, planRange, readCursor } from './cursor.js';
 
@@ -12,12 +12,24 @@ const url = process.env.TEST_DATABASE_URL ?? 'postgres://sdb:sdb@localhost:5432/
 const { db, close } = createDatabase(url, { max: 2 });
 const SOURCE = 'test-factory';
 
+/**
+ * Delete only the rows this file owns.
+ *
+ * `discovery_cursors` is shared with the swap tail, whose watermark the §21
+ * outcome suite depends on. Truncating the whole table raced that suite when
+ * vitest ran the files in parallel, producing a flaky failure that looked like
+ * a product bug.
+ */
+const OWNED = [SOURCE, 'uniswap-v2', 'aerodrome'];
+const clean = () =>
+  db.delete(discoveryCursors).where(inArray(discoveryCursors.source, OWNED));
+
 beforeEach(async () => {
-  await db.execute(sql`TRUNCATE ${discoveryCursors}`);
+  await clean();
 });
 
 afterAll(async () => {
-  await db.execute(sql`TRUNCATE ${discoveryCursors}`);
+  await clean();
   await close();
 });
 

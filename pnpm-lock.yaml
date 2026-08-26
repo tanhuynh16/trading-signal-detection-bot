@@ -237,6 +237,9 @@ importers:
       '@sdb/database':
         specifier: workspace:*
         version: link:../database
+      '@sdb/discovery':
+        specifier: workspace:*
+        version: link:../discovery
       '@sdb/domain':
         specifier: workspace:*
         version: link:../domain
@@ -246,13 +249,13 @@ importers:
       '@sdb/shared':
         specifier: workspace:*
         version: link:../shared
+      '@sdb/snapshot-engine':
+        specifier: workspace:*
+        version: link:../snapshot-engine
       drizzle-orm:
         specifier: ^0.38.3
         version: 0.38.4(postgres@3.4.9)
     devDependencies:
-      '@sdb/snapshot-engine':
-        specifier: workspace:*
-        version: link:../snapshot-engine
       viem:
         specifier: ^2.21.55
         version: 2.55.19(typescript@5.9.3)(zod@3.25.76)

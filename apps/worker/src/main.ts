@@ -9,7 +9,12 @@ import { GoPlusSecurityProvider } from '@sdb/security';
 import { DEFAULT_RULE_CONFIG } from '@sdb/risk-engine';
 import { DEFAULT_COMPONENTS, DEFAULT_PENALTIES } from '@sdb/scoring';
 import { pendingAlerts, TelegramNotifier, type Notifier } from '@sdb/notifications';
-import { dueOutcomes, recordQuoteSample } from '@sdb/outcome-tracker';
+import {
+  damagedOutcomes,
+  dueOutcomes,
+  evaluateOutcome,
+  recordQuoteSample,
+} from '@sdb/outcome-tracker';
 import { SwapTail } from '@sdb/snapshot-engine';
 import { TransferTail } from '@sdb/holder-index';
 import { startProcessors } from './processors.js';
@@ -182,6 +187,12 @@ const workers = startProcessors({
       enabled: env.OUTCOME_TRACKING_ENABLED,
       minQuoteCoverage: env.OUTCOME_MIN_QUOTE_COVERAGE,
       maxSampleAgeMs: env.QUOTE_SAMPLE_MAX_AGE_MS,
+      // §21: never measure a window the tail has not finished indexing.
+      coverage: {
+        enabled: env.OUTCOME_COVERAGE_GATE_ENABLED,
+        deferIntervalMs: env.OUTCOME_DEFER_INTERVAL_MS,
+        maxDeferMs: env.OUTCOME_MAX_DEFER_MS,
+      },
     },
     features: {
       holders: {
@@ -260,6 +271,7 @@ const discovery = new DiscoveryRunner({
 async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, 'shutting down worker');
   if (outcomeTimer) clearInterval(outcomeTimer);
+  if (repairTimer) clearInterval(repairTimer);
   await discovery.stop();
   await Promise.all(workers.map((worker) => worker.close()));
   await Promise.all(Object.values(queues).map((queue) => queue.close()));
@@ -357,11 +369,90 @@ async function reconcileOutcomes(): Promise<void> {
   }
 }
 
+/**
+ * Recompute outcomes that were measured before their trade history was complete.
+ *
+ * The coverage gate stops new rows being written that way, but Phase 7 already
+ * finalised 13 of 176 from short windows, and nothing else can ever revisit
+ * them — the insert refuses to rewrite and the reconciler skips any row that
+ * exists. This runs in-process rather than as a one-off script because the gate
+ * also records `incomplete_tail_coverage` when it gives up waiting, and those
+ * become measurable the moment the tail catches up.
+ *
+ * Every correction is written with a bumped `revision` and logged old -> new,
+ * so a restated measurement is never silent.
+ */
+async function repairOutcomes(): Promise<void> {
+  try {
+    const damaged = await damagedOutcomes(db, {
+      lookbackMs: env.OUTCOME_REPAIR_LOOKBACK_HOURS * 3_600_000,
+      limit: env.OUTCOME_REPAIR_LIMIT,
+    });
+    if (damaged.length === 0) return;
+
+    let repaired = 0;
+    let stillShort = 0;
+    for (const item of damaged) {
+      // The gate applies here too: repairing from coverage that is still short
+      // would just replace one wrong number with another.
+      const result = await evaluateOutcome(
+        db,
+        quotePrices,
+        {
+          minQuoteCoverage: env.OUTCOME_MIN_QUOTE_COVERAGE,
+          maxSampleAgeMs: env.QUOTE_SAMPLE_MAX_AGE_MS,
+          coverage: {
+            enabled: env.OUTCOME_COVERAGE_GATE_ENABLED,
+            deferIntervalMs: env.OUTCOME_DEFER_INTERVAL_MS,
+            // Repair never waits: if coverage is short right now, leave the row
+            // alone and let a later sweep pick it up.
+            maxDeferMs: Number.MAX_SAFE_INTEGER,
+          },
+        },
+        { signalId: item.signalId, horizon: item.horizon, replace: true },
+      );
+
+      if (result.status === 'deferred') {
+        stillShort += 1;
+        continue;
+      }
+      repaired += 1;
+      logger.info(
+        {
+          signalId: item.signalId,
+          horizon: item.horizon,
+          was: item.reason,
+          returnPct: result.metrics.returnPct,
+          maxRunupPct: result.metrics.maxRunupPct,
+          maxDrawdownPct: result.metrics.maxDrawdownPct,
+          trades: result.metrics.tradeCount,
+          failureReason: result.metrics.failureReason,
+        },
+        'outcome restated from complete trade history',
+      );
+    }
+
+    logger.info({ found: damaged.length, repaired, stillShort }, 'outcome repair sweep');
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error) },
+      'outcome repair failed; will retry on the next tick',
+    );
+  }
+}
+
 let outcomeTimer: NodeJS.Timeout | null = null;
+let repairTimer: NodeJS.Timeout | null = null;
 if (env.OUTCOME_TRACKING_ENABLED) {
   await reconcileOutcomes();
   outcomeTimer = setInterval(() => void reconcileOutcomes(), env.OUTCOME_RECONCILE_INTERVAL_MS);
   outcomeTimer.unref();
+
+  if (env.OUTCOME_REPAIR_ENABLED) {
+    await repairOutcomes();
+    repairTimer = setInterval(() => void repairOutcomes(), env.OUTCOME_REPAIR_INTERVAL_MS);
+    repairTimer.unref();
+  }
 }
 
 await discovery.start();

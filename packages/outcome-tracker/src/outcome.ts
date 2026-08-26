@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, lte } from 'drizzle-orm';
+import { and, asc, eq, gte, lte, sql } from 'drizzle-orm';
 import {
   pools,
   quotePriceSamples,
@@ -10,6 +10,7 @@ import {
 } from '@sdb/database';
 import { toColumn } from '@sdb/market-data';
 import { InvalidDataError, parseScaled } from '@sdb/shared';
+import { decideCoverage, tailWatermark, type CoverageConfig } from './coverage.js';
 import { horizonMs } from './horizons.js';
 import {
   baseIsToken0,
@@ -35,13 +36,20 @@ export type OutcomeConfig = {
   minQuoteCoverage: number;
   /** How far a quote sample may be from a trade before it is unusable. */
   maxSampleAgeMs: number;
+  /** §21: refuse to measure a window the tail has not finished indexing. */
+  coverage: CoverageConfig;
 };
 
-export type OutcomeResult = {
-  created: boolean;
-  metrics: OutcomeMetrics;
-  horizon: string;
-};
+export type OutcomeResult =
+  | { status: 'recorded'; created: boolean; metrics: OutcomeMetrics; horizon: string }
+  /** The tail has not reached the window end yet; try again at `retryAt`. */
+  | {
+      status: 'deferred';
+      horizon: string;
+      retryAt: Date;
+      windowEnd: Date;
+      watermarkTime: Date | null;
+    };
 
 /**
  * Evaluate one signal at one horizon (§21).
@@ -55,7 +63,18 @@ export async function evaluateOutcome(
   db: Database,
   quotes: QuoteInfo,
   config: OutcomeConfig,
-  input: { signalId: string; horizon: string },
+  input: {
+    signalId: string;
+    horizon: string;
+    /**
+     * Overwrite an existing row instead of leaving it alone.
+     *
+     * Only the repair sweep passes this. Normal evaluation stays insert-only so
+     * a replayed job can never rewrite history.
+     */
+    replace?: boolean;
+    now?: Date;
+  },
 ): Promise<OutcomeResult> {
   const elapsedMs = horizonMs(input.horizon);
   if (elapsedMs === null) {
@@ -90,6 +109,27 @@ export async function evaluateOutcome(
   const windowStart = row.createdAt;
   const windowEnd = new Date(windowStart.getTime() + elapsedMs);
 
+  // §21: measure only what the tail has provably finished indexing. Without
+  // this the result is finalised from whatever happened to be committed at the
+  // instant the horizon elapsed, which is never the whole window (ADR 0020).
+  const watermarkTime = await tailWatermark(db);
+  const coverage = decideCoverage({
+    watermarkTime,
+    windowEnd,
+    config: config.coverage,
+    ...(input.now ? { now: input.now } : {}),
+  });
+
+  if (!coverage.ready && !coverage.giveUp) {
+    return {
+      status: 'deferred',
+      horizon: input.horizon,
+      retryAt: coverage.retryAt,
+      windowEnd,
+      watermarkTime,
+    };
+  }
+
   const swaps = await db
     .select({
       // The tail stores unoriented amount0/amount1 under these column names.
@@ -115,8 +155,12 @@ export async function evaluateOutcome(
       ? await loadSamples(db, row.quoteTokenAddress, windowStart, windowEnd, config.maxSampleAgeMs)
       : [];
 
-  const metrics =
-    row.tokenDecimals === null
+  const metrics = !coverage.ready
+    ? // Waited past the cap and the tail never got there — a stalled drain, or
+      // a pool aged out of retention. Record why rather than publishing a
+      // number derived from a window we know is short (§27).
+      unmeasurable('incomplete_tail_coverage', swaps.length)
+    : row.tokenDecimals === null
       ? // Without decimals every amount is off by an unknown power of ten.
         // Defaulting to 18 would produce a confident, wrong price path.
         unmeasurable('no_token_decimals', swaps.length)
@@ -135,23 +179,46 @@ export async function evaluateOutcome(
           minCoverage: config.minQuoteCoverage,
         });
 
-  const inserted = await db
-    .insert(signalOutcomes)
-    .values({
-      signalId: row.signalId,
-      horizon: input.horizon,
-      evaluatedAt: new Date(),
-      priceUsd: toColumn(metrics.priceUsd),
-      returnPct: metrics.returnPct,
-      maxRunupPct: metrics.maxRunupPct,
-      maxDrawdownPct: metrics.maxDrawdownPct,
-      tradeCount: metrics.tradeCount,
-      failureReason: metrics.failureReason,
-    })
-    .onConflictDoNothing({ target: [signalOutcomes.signalId, signalOutcomes.horizon] })
-    .returning({ id: signalOutcomes.id });
+  const values = {
+    signalId: row.signalId,
+    horizon: input.horizon,
+    // Postgres' clock, not the app's. The repair sweep detects damage by
+    // comparing this against `trades.created_at`, which the database stamps;
+    // taking one side from a different clock would let skew hide genuinely
+    // late trades. Tests inject an explicit time instead.
+    evaluatedAt: input.now ?? sql`now()`,
+    priceUsd: toColumn(metrics.priceUsd),
+    returnPct: metrics.returnPct,
+    maxRunupPct: metrics.maxRunupPct,
+    maxDrawdownPct: metrics.maxDrawdownPct,
+    tradeCount: metrics.tradeCount,
+    failureReason: metrics.failureReason,
+  };
 
-  return { created: inserted.length > 0, metrics, horizon: input.horizon };
+  const target = [signalOutcomes.signalId, signalOutcomes.horizon];
+  const written = input.replace
+    ? await db
+        .insert(signalOutcomes)
+        .values(values)
+        .onConflictDoUpdate({
+          target,
+          // Every correction is visible: the revision counts how many times a
+          // measurement has been restated, and evaluated_at moves with it.
+          set: { ...values, revision: sql`${signalOutcomes.revision} + 1` },
+        })
+        .returning({ id: signalOutcomes.id })
+    : await db
+        .insert(signalOutcomes)
+        .values(values)
+        .onConflictDoNothing({ target })
+        .returning({ id: signalOutcomes.id });
+
+  return {
+    status: 'recorded',
+    created: written.length > 0,
+    metrics,
+    horizon: input.horizon,
+  };
 }
 
 /**

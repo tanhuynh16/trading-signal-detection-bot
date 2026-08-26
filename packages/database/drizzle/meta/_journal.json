@@ -43,6 +43,13 @@
       "when": 1787712938417,
       "tag": "0005_harsh_maximus",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787733733814,
+      "tag": "0006_chunky_namor",
+      "breakpoints": true
     }
   ]
 }

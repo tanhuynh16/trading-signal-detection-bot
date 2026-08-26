@@ -7,6 +7,8 @@
     { "path": "../shared" },
     { "path": "../domain" },
     { "path": "../database" },
-    { "path": "../providers/market-data" }
+    { "path": "../providers/market-data" },
+    { "path": "../discovery" },
+    { "path": "../snapshot-engine" }
   ]
 }

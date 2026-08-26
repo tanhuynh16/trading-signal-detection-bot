@@ -507,7 +507,7 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
    */
   const outcomeWorker = new Worker(
     QUEUE_NAMES.outcome,
-    guarded(deps, QUEUE_NAMES.outcome, async (job) => {
+    guarded(deps, QUEUE_NAMES.outcome, async (job, token) => {
       const { signalId, horizon } = job.data as { signalId: string; horizon: string };
       const log = withContext(logger, { correlationId: signalId });
 
@@ -515,6 +515,24 @@ export function startProcessors(deps: ProcessorDeps): Worker[] {
         signalId,
         horizon,
       });
+
+      // §21: the swap tail has not finished indexing this window yet. Measuring
+      // now would finalise a price path we know is short — the Phase 7 defect
+      // (ADR 0020). Reschedule instead; DelayedError costs no retry attempt.
+      if (result.status === 'deferred') {
+        log.debug(
+          {
+            signalId,
+            horizon,
+            windowEnd: result.windowEnd,
+            watermark: result.watermarkTime,
+            retryAt: result.retryAt,
+          },
+          'outcome deferred; swap tail has not covered the window end',
+        );
+        await job.moveToDelayed(result.retryAt.getTime(), token);
+        throw new DelayedError();
+      }
 
       log.info(
         {

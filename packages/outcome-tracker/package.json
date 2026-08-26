@@ -16,10 +16,11 @@
     "@sdb/domain": "workspace:*",
     "@sdb/market-data": "workspace:*",
     "@sdb/shared": "workspace:*",
-    "drizzle-orm": "^0.38.3"
+    "drizzle-orm": "^0.38.3",
+    "@sdb/discovery": "workspace:*",
+    "@sdb/snapshot-engine": "workspace:*"
   },
   "devDependencies": {
-    "@sdb/snapshot-engine": "workspace:*",
     "viem": "^2.21.55"
   }
 }

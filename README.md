@@ -26,6 +26,7 @@ repository deviates, the reason is in [`docs/adr/`](docs/adr/).
 | 6     | Telegram                                                         | **done**    |
 | 6.1   | Notification failure hardening (circuit breaker)                 | **done**    |
 | 7     | Outcome tracking                                                 | **done**    |
+| 7.1   | Outcome coverage gate + self-healing repair                      | **done**    |
 | 8     | Strategy evaluation                                              | not started |
 
 Per spec §29, phases land one at a time with review in between. Full detail in

@@ -1,9 +1,10 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { sql } from 'drizzle-orm';
+import { inArray, sql } from 'drizzle-orm';
 import {
   createDatabase,
   featureSets,
   pools,
+  discoveryCursors,
   quotePriceSamples,
   riskResults,
   signalAlerts,
@@ -16,7 +17,8 @@ import {
 } from '@sdb/database';
 import { ONE_USD } from '@sdb/market-data';
 import { parseScaled } from '@sdb/shared';
-import { trackedPools } from '@sdb/snapshot-engine';
+import { advanceCursor } from '@sdb/discovery';
+import { SWAP_TAIL_SOURCE, trackedPools } from '@sdb/snapshot-engine';
 import { evaluateOutcome, type QuoteInfo } from './outcome.js';
 import { dueOutcomes } from './reconcile.js';
 import { recordQuoteSample } from './quote-samples.js';
@@ -36,7 +38,17 @@ const quotes: QuoteInfo = {
   fixedUsdFor: (address) => (address.toLowerCase() === USDC ? ONE_USD : null),
 };
 
-const config = { minQuoteCoverage: 0.8, maxSampleAgeMs: 300_000 };
+const config = {
+  minQuoteCoverage: 0.8,
+  maxSampleAgeMs: 300_000,
+  // These cases are about metric correctness, not coverage, so the tail is
+  // primed as fully caught up rather than switching the gate off — the suite
+  // should exercise the same guard production runs with (ADR 0020).
+  coverage: { enabled: true, deferIntervalMs: 30_000, maxDeferMs: 1_800_000 },
+};
+
+/** The swap tail has indexed everything these cases could ask about. */
+const FULLY_INDEXED = new Date('2099-01-01T00:00:00Z');
 
 let seq = 0;
 /** A token below the quote address, so the candidate is token0. */
@@ -122,11 +134,18 @@ const truncate = sql`TRUNCATE ${signalOutcomes}, ${signalAlerts}, ${signalTransi
   ${signals}, ${riskResults}, ${featureSets}, ${tokenSnapshots}, ${trades}, ${pools},
   ${tokens}, ${quotePriceSamples} RESTART IDENTITY CASCADE`;
 
+/** Only the cursor rows this file owns; the table is shared. */
+const cleanCursors = () =>
+  db.delete(discoveryCursors).where(inArray(discoveryCursors.source, [SWAP_TAIL_SOURCE]));
+
 beforeEach(async () => {
   await db.execute(truncate);
+  await cleanCursors();
+  await advanceCursor(db, SWAP_TAIL_SOURCE, 1n, FULLY_INDEXED);
 });
 afterAll(async () => {
   await db.execute(truncate);
+  await cleanCursors();
   await close();
 });
 

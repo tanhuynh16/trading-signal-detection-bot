@@ -64,23 +64,75 @@ export async function readCursor(db: Database, source: string): Promise<bigint |
   return rows[0]?.lastProcessedBlock ?? null;
 }
 
+export type CursorState = {
+  lastProcessedBlock: bigint;
+  /** Block time of the watermark; null for sources that do not stamp it. */
+  lastProcessedBlockTime: Date | null;
+};
+
+/**
+ * The watermark in both dimensions.
+ *
+ * §21 needs to ask "has ingestion covered this INSTANT?", which the block
+ * number alone cannot answer. Consumers that care about completeness in time —
+ * outcome measurement — read this instead of `readCursor`.
+ */
+export async function readCursorState(
+  db: Database,
+  source: string,
+): Promise<CursorState | null> {
+  const rows = await db
+    .select({
+      lastProcessedBlock: discoveryCursors.lastProcessedBlock,
+      lastProcessedBlockTime: discoveryCursors.lastProcessedBlockTime,
+    })
+    .from(discoveryCursors)
+    .where(eq(discoveryCursors.source, source))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
 /**
  * Advance the cursor, never rewind it. A retried or overlapping chunk must not
  * move the watermark backwards, or a concurrent drain could reopen a gap.
+ *
+ * `blockTime` is the timestamp of `block`, supplied only by callers that can
+ * prove they have covered everything up to it. It is guarded by the same
+ * `greatest()` as the block number: a late drain finishing out of order must
+ * not walk the time watermark backwards either, since a consumer would then
+ * believe less is covered than actually is — or worse, if it could move
+ * forward wrongly, more.
+ *
+ * Passing it as `null` leaves whatever is stored untouched rather than
+ * clearing it, so a caller that does not know the time cannot erase a
+ * watermark another pass established.
  */
 export async function advanceCursor(
   db: Database,
   source: string,
   block: bigint,
+  blockTime?: Date,
 ): Promise<void> {
+  const now = new Date();
   await db
     .insert(discoveryCursors)
-    .values({ source, lastProcessedBlock: block, updatedAt: new Date() })
+    .values({
+      source,
+      lastProcessedBlock: block,
+      lastProcessedBlockTime: blockTime ?? null,
+      updatedAt: now,
+    })
     .onConflictDoUpdate({
       target: discoveryCursors.source,
       set: {
         lastProcessedBlock: sql`greatest(${discoveryCursors.lastProcessedBlock}, excluded.last_processed_block)`,
-        updatedAt: new Date(),
+        // ISO string with an explicit cast: the driver cannot bind a JS Date
+        // through a raw sql`` parameter (ADR 0014).
+        lastProcessedBlockTime:
+          blockTime === undefined
+            ? sql`${discoveryCursors.lastProcessedBlockTime}`
+            : sql`greatest(${discoveryCursors.lastProcessedBlockTime}, ${blockTime.toISOString()}::timestamptz)`,
+        updatedAt: now,
       },
     });
 }

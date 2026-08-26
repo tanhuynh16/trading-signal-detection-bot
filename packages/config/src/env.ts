@@ -64,11 +64,34 @@ const envSchema = z.object({
    * How long a signalled pool keeps being indexed by the swap tail. Must exceed
    * the longest horizon (24h) or that horizon has no trades to measure.
    */
-  OUTCOME_TAIL_RETENTION_HOURS: z.coerce.number().int().positive().default(25),
+  OUTCOME_TAIL_RETENTION_HOURS: z.coerce.number().int().positive().default(26),
   /** How far a quote-price sample may sit from a trade before it is unusable. */
   QUOTE_SAMPLE_MAX_AGE_MS: z.coerce.number().int().positive().default(300_000),
   /** Fraction of a path's swaps that must be priceable to report a number. */
   OUTCOME_MIN_QUOTE_COVERAGE: z.coerce.number().min(0).max(1).default(0.8),
+
+  /**
+   * §21 coverage gate (ADR 0020): refuse to measure a window the swap tail has
+   * not finished indexing. Without it an outcome is finalised from whatever was
+   * committed at the instant the horizon elapsed, which is never the whole
+   * window — measured at 13 of 176 rows wrong, one by 45 percentage points.
+   */
+  OUTCOME_COVERAGE_GATE_ENABLED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+  OUTCOME_DEFER_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  /** Cap on waiting, so a stalled tail cannot leave a horizon unrecorded. */
+  OUTCOME_MAX_DEFER_MS: z.coerce.number().int().positive().default(1_800_000),
+
+  /** Self-healing repair of outcomes measured before their history was complete. */
+  OUTCOME_REPAIR_ENABLED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+  OUTCOME_REPAIR_INTERVAL_MS: z.coerce.number().int().positive().default(900_000),
+  OUTCOME_REPAIR_LOOKBACK_HOURS: z.coerce.number().int().positive().default(48),
+  OUTCOME_REPAIR_LIMIT: z.coerce.number().int().positive().default(100),
 
   // Spec §10.2: replay overlap so a restart cannot skip blocks.
   DISCOVERY_BLOCK_OVERLAP: z.coerce.number().int().nonnegative().default(50),

@@ -151,6 +151,18 @@ async function persistSwaps(
  * trade's economic time is its block's. Blocks are deduplicated because a busy
  * window yields many logs from few blocks.
  */
+/**
+ * Timestamp of a single block, for the coverage watermark.
+ *
+ * One extra getBlock per completed drain — measured cadence is ~5.8s, so about
+ * 620 calls an hour, roughly 1% of the free-tier budget. Cheap next to the
+ * alternative of an outcome job fetching its own window at horizon time.
+ */
+async function headTime(client: PublicClient, block: bigint): Promise<Date> {
+  const header = await client.getBlock({ blockNumber: block, includeTransactions: false });
+  return fromUnixSeconds(header.timestamp);
+}
+
 async function blockTimestamps(client: PublicClient, logs: Log[]): Promise<Map<string, Date>> {
   const unique = [...new Set(logs.map((l) => l.blockNumber).filter((b): b is bigint => b !== null))];
   const entries = await Promise.all(
@@ -179,8 +191,10 @@ export class SwapTail {
       const tracked = await trackedPools(this.deps.db, this.deps.config);
       if (tracked.length === 0) {
         // Nothing to watch. Keep the cursor at head so that when pools do
-        // appear we do not replay a long idle stretch.
-        await advanceCursor(this.deps.db, SWAP_TAIL_SOURCE, head);
+        // appear we do not replay a long idle stretch. Coverage up to head is
+        // still complete — vacuously, since there was nothing to collect — so
+        // the time watermark advances too (§21).
+        await advanceCursor(this.deps.db, SWAP_TAIL_SOURCE, head, await headTime(this.deps.http, head));
         return { swaps: 0 };
       }
 
@@ -235,6 +249,19 @@ export class SwapTail {
           },
         );
       }
+
+      // Every batch finished without throwing, so coverage really does reach
+      // head. Only now is it safe to stamp the time watermark: §21 outcome
+      // measurement gates on it, and claiming coverage the tail does not have
+      // would let an outcome be finalised from an incomplete price path — the
+      // exact defect this guards (ADR 0020). A mid-drain failure throws before
+      // reaching here and leaves the older, conservative value in place.
+      await advanceCursor(
+        this.deps.db,
+        SWAP_TAIL_SOURCE,
+        plan.toBlock,
+        await headTime(this.deps.http, plan.toBlock),
+      );
 
       // Outcome retention (§21) keeps pools in the filter long after discovery,
       // and each batch past the first is a real extra request per block chunk.
