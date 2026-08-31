@@ -87,6 +87,7 @@ export async function evaluateOutcome(
     .select({
       signalId: signals.id,
       createdAt: signals.createdAt,
+      signalBlockTime: signals.signalBlockTime,
       signalPriceUsd: signals.signalPriceUsd,
       poolId: pools.id,
       quoteTokenAddress: pools.quoteTokenAddress,
@@ -106,7 +107,14 @@ export async function evaluateOutcome(
     });
   }
 
-  const windowStart = row.createdAt;
+  // Anchor the window on BLOCK time, the same clock the trades inside it are
+  // stamped with and the same clock the tail's coverage watermark uses.
+  // `created_at` is Postgres wall time; measured minimum ingestion latency was
+  // −63.2s, so a window built from it could be a minute out at both edges,
+  // silently including trades from before the signal or excluding trades from
+  // just before the horizon. Rows written before `signal_block_time` existed
+  // fall back to `created_at` — they do not gain precision retroactively.
+  const windowStart = row.signalBlockTime ?? row.createdAt;
   const windowEnd = new Date(windowStart.getTime() + elapsedMs);
 
   // §21: measure only what the tail has provably finished indexing. Without

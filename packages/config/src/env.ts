@@ -96,6 +96,13 @@ const envSchema = z.object({
   // Spec §10.2: replay overlap so a restart cannot skip blocks.
   DISCOVERY_BLOCK_OVERLAP: z.coerce.number().int().nonnegative().default(50),
 
+  // Blocks to stay behind head when discovering pools. Zero on purpose: §10
+  // wants a new pool found within seconds, and the worst case of reading an
+  // unconfirmed block here is a `pools` row for a pool that stopped existing —
+  // which then produces no snapshots and expires. Paying discovery latency to
+  // avoid that is a bad trade. The swap tail makes the opposite trade below.
+  DISCOVERY_CONFIRMATIONS: z.coerce.number().int().nonnegative().default(0),
+
   // On first start there is no cursor. Seeding at head - N surfaces real pools
   // within minutes instead of idling until a launch happens. ~1h at 2s blocks.
   DISCOVERY_FIRST_START_BACKFILL_BLOCKS: z.coerce.number().int().nonnegative().default(300),
@@ -138,6 +145,19 @@ const envSchema = z.object({
 
   // Addresses per eth_getLogs call in the swap tail; the list is batched to fit.
   SWAP_TAIL_MAX_ADDRESSES: z.coerce.number().int().positive().default(100),
+
+  // Blocks to stay behind head when indexing swaps. Unlike discovery, this one
+  // waits: `trades` is what §21 measures outcomes from and §22 evaluates, and a
+  // signal_outcomes row is never recomputed once written, so a swap from a
+  // block that later reorgs out is permanently wrong. 5 blocks is ~10s on
+  // Base — invisible next to a 1m shortest horizon, and it only delays the
+  // coverage watermark, which Phase 7.1's deferral already absorbs.
+  SWAP_TAIL_CONFIRMATIONS: z.coerce.number().int().nonnegative().default(5),
+
+  // How far back to rewind when the stored block hash no longer matches chain.
+  // ~64s on Base, far past any observed sequencer reorg. A reorg deeper than
+  // this is not handled, and ADR 0022 says so rather than implying otherwise.
+  SWAP_TAIL_REORG_DEPTH: z.coerce.number().int().positive().default(32),
 
   // Snapshots land on the §13 schedule, not on exact feature boundaries, so
   // "liquidity 5m ago" resolves to the nearest observation within this window.

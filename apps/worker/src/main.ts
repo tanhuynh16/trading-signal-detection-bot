@@ -107,6 +107,10 @@ const swapTail = new SwapTail({
     // §21: a signalled pool keeps being indexed past its discovery window, or
     // the 24h horizon has no trades to measure.
     outcomeRetentionHours: env.OUTCOME_TAIL_RETENTION_HOURS,
+    // Unlike discovery, the tail stays behind head: its rows are what §21
+    // measures outcomes from, and an outcome is never recomputed once written.
+    confirmations: env.SWAP_TAIL_CONFIRMATIONS,
+    reorgDepth: env.SWAP_TAIL_REORG_DEPTH,
   },
 });
 
@@ -256,6 +260,7 @@ const discovery = new DiscoveryRunner({
     includeAerodromeStable: env.AERODROME_INCLUDE_STABLE,
     pollIntervalMs: env.DISCOVERY_POLL_INTERVAL_MS,
     minDrainIntervalMs: env.DISCOVERY_MIN_DRAIN_INTERVAL_MS,
+    confirmations: env.DISCOVERY_CONFIRMATIONS,
   },
   // Spec §23: the job ID is derived from the work, so a replayed block range
   // cannot enqueue the same candidate twice.

@@ -13,6 +13,14 @@ export type DiscoveryConfig = {
   quoteTokens: readonly string[];
   overlapBlocks: number;
   firstStartBackfillBlocks: number;
+  /**
+   * Blocks to stay behind head. Zero by default, and deliberately so: §10 wants
+   * a new pool found within seconds, and the worst case of reading an
+   * unconfirmed block here is a `pools` row for a pool that stopped existing,
+   * which then produces no snapshots and expires on its own. The swap tail
+   * makes the opposite trade, because its rows are permanent (ADR 0022).
+   */
+  confirmations: number;
   logChunkBlocks: number;
   includeAerodromeStable: boolean;
   /** Fallback drain interval when no new head arrives (§10.2 socket death). */
@@ -62,6 +70,7 @@ export async function drainFactory(
     overlapBlocks: config.overlapBlocks,
     firstStartBackfillBlocks: config.firstStartBackfillBlocks,
     isFirstDrain,
+    confirmations: config.confirmations,
   });
 
   if (plan.seeded) {

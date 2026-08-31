@@ -92,8 +92,56 @@ export const discoveryCursors = pgTable('discovery_cursors', {
    * it null, since no consumer needs their coverage in time terms.
    */
   lastProcessedBlockTime: timestamp('last_processed_block_time', { withTimezone: true }),
+  /**
+   * Hash of `last_processed_block`, for reorg detection.
+   *
+   * A cursor holding only a block NUMBER cannot tell that the chain beneath it
+   * changed: number 1000 always exists, it is simply a different block after a
+   * reorg. Storing the hash we actually read makes the check a comparison
+   * rather than a guess. Only the swap tail maintains it — its rows feed §21
+   * outcome math, which is never recomputed once written, so a phantom trade
+   * there is permanent in a way a phantom pool is not.
+   */
+  lastProcessedBlockHash: text('last_processed_block_hash'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Every rollback the reorg detector performed, one row each.
+ *
+ * Re-ingestion after a rollback gives the replacement trades a fresh
+ * `created_at`, which the Phase 7.1 `late_trades` detector already notices. It
+ * misses exactly one case: the reorg removed trades and the canonical chain has
+ * none to replace them, so nothing is re-inserted and nothing looks late. That
+ * is also the case where the outcome is most wrong — it was computed from swaps
+ * that never happened. This table is what lets the repair sweep find those.
+ */
+export const reorgEvents = pgTable(
+  'reorg_events',
+  {
+    id: serial('id').primaryKey(),
+    /** Cursor source that detected it, e.g. 'swap-tail'. */
+    source: text('source').notNull(),
+    /** Cursor position when the mismatch was found. */
+    detectedAtBlock: bigint('detected_at_block', { mode: 'bigint' }).notNull(),
+    /** Cursor position after rewinding; trades above this were deleted. */
+    rewoundToBlock: bigint('rewound_to_block', { mode: 'bigint' }).notNull(),
+    /**
+     * Block time of `rewound_to_block`, so a repair query can ask which outcome
+     * windows overlap the rolled-back range without re-reading the chain.
+     * Null when the rewind target's timestamp could not be read.
+     */
+    rewoundToBlockTime: timestamp('rewound_to_block_time', { withTimezone: true }),
+    /** Hash we had stored, and what the chain says now — both kept for audit. */
+    expectedHash: text('expected_hash'),
+    actualHash: text('actual_hash'),
+    deletedTrades: integer('deleted_trades').notNull().default(0),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    timeIdx: index('reorg_events_time_idx').on(t.occurredAt),
+  }),
+);
 
 export const tokenSnapshots = pgTable(
   'token_snapshots',
@@ -305,6 +353,17 @@ export const signals = pgTable(
     /** Reference price at signal time, frozen for outcome math (§21). */
     signalPriceUsd: usd('signal_price_usd'),
     signalBlockNumber: bigint('signal_block_number', { mode: 'bigint' }),
+    /**
+     * Block time of `signal_block_number` — the outcome window's true anchor.
+     *
+     * §21 windows were built from `created_at`, which is Postgres WALL time,
+     * then filled with trades selected on `occurred_at`, which is BLOCK time.
+     * Measured minimum ingestion latency was −63.2s, so the two clocks
+     * genuinely disagree and every window edge was that far out. Null on rows
+     * written before this column existed; consumers fall back to `created_at`
+     * rather than pretending those rows gained precision they never had.
+     */
+    signalBlockTime: timestamp('signal_block_time', { withTimezone: true }),
   },
   (t) => ({
     tokenTimeIdx: index('signals_token_time_idx').on(t.tokenId, t.createdAt),

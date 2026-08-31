@@ -192,6 +192,14 @@ export type PoolContext = {
   peakLiquidityUsd: number | null;
   priceUsd: string | null;
   blockNumber: bigint | null;
+  /**
+   * Block time of `blockNumber` — the chain's clock, not ours.
+   *
+   * §21 outcome windows are anchored on this rather than on the signal row's
+   * `created_at`, because the trades that fill those windows are timestamped in
+   * block time and the two clocks were measured to disagree by up to 63s.
+   */
+  blockTime: Date | null;
   minutesSinceLastTrade: number | null;
 };
 
@@ -219,6 +227,7 @@ export async function loadPoolContext(
       liquidityUsd: tokenSnapshots.liquidityUsd,
       priceUsd: tokenSnapshots.priceUsd,
       blockNumber: tokenSnapshots.blockNumber,
+      observedAt: tokenSnapshots.observedAt,
     })
     .from(tokenSnapshots)
     .where(eq(tokenSnapshots.poolId, poolId))
@@ -244,6 +253,7 @@ export async function loadPoolContext(
     peakLiquidityUsd: peak[0]?.peak != null ? Number(peak[0].peak) : null,
     priceUsd: latest?.priceUsd ?? null,
     blockNumber: latest?.blockNumber ?? null,
+    blockTime: latest?.observedAt ?? null,
     minutesSinceLastTrade:
       lastAt === null ? null : (Date.now() - lastAt.getTime()) / 60_000,
   };
@@ -303,6 +313,7 @@ export async function recordStateEntry(
         // Frozen at emission; §21 computes every return against this.
         signalPriceUsd: input.context.priceUsd,
         signalBlockNumber: input.context.blockNumber,
+        signalBlockTime: input.context.blockTime,
       })
       .returning({ id: signals.id });
 

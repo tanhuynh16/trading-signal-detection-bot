@@ -1,7 +1,13 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { inArray } from 'drizzle-orm';
 import { createDatabase, discoveryCursors } from '@sdb/database';
-import { advanceCursor, planRange, readCursor } from './cursor.js';
+import {
+  advanceCursor,
+  planRange,
+  readCursor,
+  readCursorState,
+  rewindCursor,
+} from './cursor.js';
 
 /**
  * Spec §10.3: "restarting the worker does not permanently skip blocks."
@@ -78,5 +84,115 @@ describe('discovery cursor persistence', () => {
     // Must not start past the watermark+1, or blocks are skipped for good.
     expect(plan.fromBlock).toBeLessThanOrEqual(lastProcessed! + 1n);
     expect(plan.fromBlock).toBe(951n);
+  });
+});
+
+/**
+ * The block hash is what makes a reorg detectable — a block NUMBER always
+ * exists after one, it is simply a different block. These cases guard the
+ * pairing between the two, because a hash describing a block the cursor is not
+ * on reads as a mismatch and deletes good data (ADR 0022).
+ */
+describe('block hash pairing', () => {
+  it('stores the hash alongside the block it describes', async () => {
+    await advanceCursor(db, SOURCE, 100n, new Date('2026-01-01T00:00:00Z'), '0xaaa');
+
+    const state = await readCursorState(db, SOURCE);
+    expect(state?.lastProcessedBlock).toBe(100n);
+    expect(state?.lastProcessedBlockHash).toBe('0xaaa');
+  });
+
+  it('clears the hash when the block advances without one', async () => {
+    // A mid-drain chunk commit moves the block but knows no hash. Keeping the
+    // old one would leave the cursor claiming a hash for a block behind it,
+    // and the very next reorg check would roll back healthy history.
+    await advanceCursor(db, SOURCE, 100n, undefined, '0xaaa');
+    await advanceCursor(db, SOURCE, 150n);
+
+    const state = await readCursorState(db, SOURCE);
+    expect(state?.lastProcessedBlock).toBe(150n);
+    expect(state?.lastProcessedBlockHash).toBeNull();
+  });
+
+  it('keeps the hash when a late drain fails to move the block', async () => {
+    await advanceCursor(db, SOURCE, 200n, undefined, '0xaaa');
+    await advanceCursor(db, SOURCE, 150n);
+
+    const state = await readCursorState(db, SOURCE);
+    expect(state?.lastProcessedBlock).toBe(200n);
+    expect(state?.lastProcessedBlockHash).toBe('0xaaa');
+  });
+
+  it('refuses a hash from a drain that lost the greatest() race', async () => {
+    // 150 is behind the stored 200, so its hash is not ours to write.
+    await advanceCursor(db, SOURCE, 200n, undefined, '0xaaa');
+    await advanceCursor(db, SOURCE, 150n, undefined, '0xbbb');
+
+    const state = await readCursorState(db, SOURCE);
+    expect(state?.lastProcessedBlockHash).toBe('0xaaa');
+  });
+
+  it('re-stamps the hash when the end-of-drain write lands on the same block', async () => {
+    // The normal case: the last chunk advanced to N with no hash, then the
+    // watermark write stamps N with one. Requiring strictly-greater here would
+    // leave the hash permanently null and disable detection entirely.
+    await advanceCursor(db, SOURCE, 300n);
+    await advanceCursor(db, SOURCE, 300n, new Date('2026-01-01T00:00:00Z'), '0xccc');
+
+    const state = await readCursorState(db, SOURCE);
+    expect(state?.lastProcessedBlockHash).toBe('0xccc');
+  });
+});
+
+describe('rewindCursor — the one case advanceCursor refuses', () => {
+  it('moves block and time backwards together', async () => {
+    await advanceCursor(db, SOURCE, 500n, new Date('2026-01-01T01:00:00Z'), '0xaaa');
+    await rewindCursor(db, SOURCE, 400n, new Date('2026-01-01T00:30:00Z'));
+
+    const state = await readCursorState(db, SOURCE);
+    expect(state?.lastProcessedBlock).toBe(400n);
+    expect(state?.lastProcessedBlockTime?.toISOString()).toBe('2026-01-01T00:30:00.000Z');
+  });
+
+  it('drops the time watermark, not just the block', async () => {
+    // The load-bearing half. §21's coverage gate reads the time watermark as
+    // proof that every block up to that instant is committed; leaving it
+    // forward after deleting the trades underneath would let an outcome be
+    // finalised from a window whose contents were just removed.
+    await advanceCursor(db, SOURCE, 500n, new Date('2026-01-01T01:00:00Z'), '0xaaa');
+    const before = await readCursorState(db, SOURCE);
+
+    await rewindCursor(db, SOURCE, 400n, new Date('2026-01-01T00:30:00Z'));
+    const after = await readCursorState(db, SOURCE);
+
+    expect(after!.lastProcessedBlockTime!.getTime()).toBeLessThan(
+      before!.lastProcessedBlockTime!.getTime(),
+    );
+  });
+
+  it('clears the hash, because the stored one is known wrong', async () => {
+    await advanceCursor(db, SOURCE, 500n, new Date('2026-01-01T01:00:00Z'), '0xaaa');
+    await rewindCursor(db, SOURCE, 400n, null);
+
+    const state = await readCursorState(db, SOURCE);
+    expect(state?.lastProcessedBlockHash).toBeNull();
+  });
+
+  it('accepts a null time when the rewind target could not be read', async () => {
+    // Null reads as "coverage unknown", which the gate treats as not covered —
+    // the conservative direction.
+    await advanceCursor(db, SOURCE, 500n, new Date('2026-01-01T01:00:00Z'), '0xaaa');
+    await rewindCursor(db, SOURCE, 400n, null);
+
+    const state = await readCursorState(db, SOURCE);
+    expect(state?.lastProcessedBlockTime).toBeNull();
+  });
+
+  it('leaves other sources untouched', async () => {
+    await advanceCursor(db, SOURCE, 500n);
+    await advanceCursor(db, 'uniswap-v2', 900n);
+    await rewindCursor(db, SOURCE, 400n, null);
+
+    expect(await readCursor(db, 'uniswap-v2')).toBe(900n);
   });
 });

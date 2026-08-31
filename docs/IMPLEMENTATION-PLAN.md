@@ -15,11 +15,18 @@ gap resolutions below by their G-numbers.
 | 3 | Risk engine | **done** |
 | 4a | Features: liquidity, momentum | **done** |
 | 4b | Features: holders, clustering, smart money | **done** |
-| R | Replay/backfill harness (cross-cutting, alongside Phase 4) | not started |
 | 5 | Normalization, scoring, signal state machine | **done** |
-| 6 | Telegram | **done** (delivery unverified) |
-| 7 | Outcome tracking | not started |
-| 8 | Strategy evaluation | not started |
+| 5.1 | Concurrency and re-alert hardening | **done** |
+| 6 | Telegram | **done** |
+| 6.1 | Notification failure hardening (circuit breaker) | **done** |
+| 7 | Outcome tracking | **done** |
+| 7.1 | Outcome coverage gate + self-healing repair | **done** |
+| 8 | Strategy evaluation | **done** |
+| 9 | Reorg safety and block-time outcome windows | **done** |
+| R | Replay/backfill harness (cross-cutting) | not started |
+
+All nine numbered phases are complete; §26 defines through Phase 8, and Phase 9
+closes the two data-correctness findings the Phase 7.1 audit left open.
 
 Spec §29 requires landing one phase at a time with review in between. At each
 boundary, report changed files, commands run, tests run, acceptance criteria
@@ -396,6 +403,37 @@ exit at the horizon price.
 **The report currently says INSUFFICIENT almost everywhere** — the whole sample
 sits below score 61 with 10–25 outcomes per horizon and no STRONG signals. That
 is the correct answer, and saying it plainly is the point (ADR 0021).
+
+### Phase 9 — Reorg safety and one clock for outcome windows ✅
+The two data-correctness findings the Phase 7.1 audit deferred, closed before
+accumulating the weeks of history Phase 8 needs — fixing them afterwards would
+have made the whole sample suspect.
+
+Confirmations are applied **asymmetrically**: the swap tail stays 5 blocks
+(~10s) behind head because its rows feed §21 outcome math that is never
+recomputed, while discovery stays at head because §10 wants a pool found within
+seconds and an unconfirmed read there costs at worst a `pools` row that expires
+on its own. Confirmations only make a reorg rare, so the tail also stores the
+watermark block's hash — free, from a `getBlock` it already made — and rolls
+back on a mismatch: rewind 32 blocks, delete the trades above, record a
+`reorg_events` row, re-read next drain.
+
+The clock fix turned out to matter far more than the audit's −63.2s suggested.
+Measured on live data: block time tracked the wall clock to within **6s across
+all 6100 snapshots**, while `signals.created_at` — `now()`, and therefore
+transaction-start time, the same property ADR 0016 found — was more than a
+minute out on **104 of 1095 signals**, worst case **7208s**. 292 of 5463
+recorded outcomes had been measured over a wrong window. Windows now anchor on
+`signal_block_time`, and migration 0008 backfills it exactly from the snapshot
+that produced each signal.
+
+Full reasoning, including what was deliberately left for a human decision:
+[ADR 0022](adr/0022-reorg-safety-and-block-time-windows.md).
+
+*Known limitation:* live verification against Base could not be run — the
+Alchemy free tier hit its monthly capacity limit. §29 forbids silently choosing
+a paid tier, so chain-facing behaviour rests on integration tests against a fake
+chain until an endpoint is available.
 
 ### Cross-cutting
 Built into each phase, not deferred: the six §23 queues with idempotent job IDs,

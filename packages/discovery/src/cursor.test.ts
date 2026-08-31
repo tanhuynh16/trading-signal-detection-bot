@@ -110,3 +110,71 @@ describe('overlap is startup-only', () => {
     expect(plan.fromBlock).toBe(951n);
   });
 });
+
+/**
+ * Reading to `head` means writing rows from blocks that can still be reorged
+ * out. The depth is per source on purpose (ADR 0022): discovery keeps 0 because
+ * §10 wants a pool found within seconds, while the swap tail waits because its
+ * rows feed §21 outcome math that is never recomputed.
+ */
+describe('confirmations keep a drain behind the head', () => {
+  it('stops short of head by the configured depth', () => {
+    const plan = planRange({
+      lastProcessed: 1_000n,
+      head: 1_100n,
+      overlapBlocks: 0,
+      firstStartBackfillBlocks: 0,
+      confirmations: 5,
+    });
+    expect(plan.toBlock).toBe(1_095n);
+  });
+
+  it('defaults to reading all the way to head', () => {
+    // Omitting the option must not silently change discovery's behaviour.
+    const plan = planRange({
+      lastProcessed: 1_000n,
+      head: 1_100n,
+      overlapBlocks: 0,
+      firstStartBackfillBlocks: 0,
+    });
+    expect(plan.toBlock).toBe(1_100n);
+  });
+
+  it('applies the depth to a first-start backfill too', () => {
+    const plan = planRange({
+      lastProcessed: null,
+      head: 1_000n,
+      overlapBlocks: 0,
+      firstStartBackfillBlocks: 100,
+      confirmations: 10,
+    });
+    expect(plan.toBlock).toBe(990n);
+    expect(plan.fromBlock).toBe(890n);
+  });
+
+  it('clamps at genesis rather than going negative', () => {
+    const plan = planRange({
+      lastProcessed: null,
+      head: 3n,
+      overlapBlocks: 0,
+      firstStartBackfillBlocks: 0,
+      confirmations: 10,
+    });
+    expect(plan.toBlock).toBe(0n);
+    expect(plan.fromBlock).toBe(0n);
+  });
+
+  it('produces an empty range when the cursor is already past the safe head', () => {
+    // The caller checks `fromBlock > toBlock` and skips; the tail must not be
+    // asked to fetch a backwards range while it waits for confirmations.
+    const plan = planRange({
+      lastProcessed: 1_099n,
+      head: 1_100n,
+      overlapBlocks: 0,
+      firstStartBackfillBlocks: 0,
+      confirmations: 5,
+      isFirstDrain: false,
+    });
+    expect(plan.fromBlock > plan.toBlock).toBe(true);
+  });
+});

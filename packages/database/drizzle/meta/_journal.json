@@ -50,6 +50,20 @@
       "when": 1787733733814,
       "tag": "0006_chunky_namor",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788166265248,
+      "tag": "0007_lying_black_bolt",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788166265249,
+      "tag": "0008_block_time_anchor_backfill",
+      "breakpoints": true
     }
   ]
 }

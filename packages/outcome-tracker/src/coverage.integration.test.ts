@@ -1,11 +1,12 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { inArray, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import {
   createDatabase,
   discoveryCursors,
   featureSets,
   pools,
   quotePriceSamples,
+  reorgEvents,
   riskResults,
   signalAlerts,
   signalOutcomes,
@@ -42,7 +43,9 @@ const config = { minQuoteCoverage: 0.8, maxSampleAgeMs: 300_000, coverage: gate 
 let seq = 0;
 const addr = (n: number) => `0x0${n.toString(16).padStart(39, '0')}`;
 
-async function seedSignal(over: { createdAt?: Date; signalPriceUsd?: string } = {}) {
+async function seedSignal(
+  over: { createdAt?: Date; signalPriceUsd?: string; signalBlockTime?: Date } = {},
+) {
   seq += 1;
   const [token] = await db
     .insert(tokens)
@@ -80,6 +83,7 @@ async function seedSignal(over: { createdAt?: Date; signalPriceUsd?: string } = 
       alertLevel: 'STRONG',
       signalPriceUsd: over.signalPriceUsd ?? '1000',
       ...(over.createdAt ? { createdAt: over.createdAt } : {}),
+      ...(over.signalBlockTime ? { signalBlockTime: over.signalBlockTime } : {}),
     })
     .returning({ id: signals.id, createdAt: signals.createdAt });
 
@@ -119,10 +123,12 @@ const cleanCursors = () =>
 beforeEach(async () => {
   await db.execute(truncate);
   await cleanCursors();
+  await db.delete(reorgEvents).where(eq(reorgEvents.source, SWAP_TAIL_SOURCE));
 });
 afterAll(async () => {
   await db.execute(truncate);
   await cleanCursors();
+  await db.delete(reorgEvents).where(eq(reorgEvents.source, SWAP_TAIL_SOURCE));
   await close();
 });
 
@@ -356,5 +362,221 @@ describe('repair sweep', () => {
     await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' });
 
     expect(await damagedOutcomes(db, { lookbackMs: 48 * 3_600_000, limit: 100 })).toEqual([]);
+  });
+});
+
+/**
+ * §21 windows were built from `signals.created_at` — Postgres WALL time — then
+ * filled with trades selected on `occurred_at`, which is BLOCK time. Measured
+ * minimum ingestion latency was −63.2s, so both edges of every window could be
+ * a minute out: including trades from before the signal, or excluding trades
+ * from just under the horizon (ADR 0022).
+ */
+describe('the outcome window runs on the chain’s clock', () => {
+  const repairConfig = { lookbackMs: 48 * 3_600_000, limit: 100 };
+
+  it('anchors on block time when the signal recorded one', async () => {
+    // Wall clock and block clock disagree by a minute. A trade at block-time
+    // +30s is inside the 1m window; measured against `created_at` it would sit
+    // at −30s and be excluded entirely.
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const blockTime = new Date(createdAt.getTime() - 60_000);
+    const { signalId, poolId } = await seedSignal({ createdAt, signalBlockTime: blockTime });
+
+    await seedTrade(poolId, {
+      tokens: '1',
+      eth: '0.75',
+      occurredAt: new Date(blockTime.getTime() + 30_000),
+      block: 20,
+    });
+    await recordQuoteSample(db, {
+      chainId: CHAIN,
+      tokenAddress: WETH,
+      priceUsd: parseScaled('2000'),
+      observedAt: new Date(blockTime.getTime() + 30_000),
+    });
+    await setWatermark(new Date(blockTime.getTime() + 60_000));
+
+    const result = await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' });
+
+    expect(result.status).toBe('recorded');
+    if (result.status === 'recorded') {
+      expect(result.metrics.tradeCount).toBe(1);
+      expect(result.metrics.returnPct).toBe('50');
+    }
+  });
+
+  it('gates coverage against the block-time window end, not the wall-clock one', async () => {
+    // Both sides of the comparison are now block time. A watermark short of the
+    // block-time end must defer even though it is past the wall-clock end.
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const blockTime = new Date(createdAt.getTime() + 60_000);
+    const { signalId } = await seedSignal({ createdAt, signalBlockTime: blockTime });
+
+    await setWatermark(new Date(createdAt.getTime() + 60_000));
+    const result = await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' });
+
+    expect(result.status).toBe('deferred');
+    if (result.status === 'deferred') {
+      expect(result.windowEnd.getTime()).toBe(blockTime.getTime() + 60_000);
+    }
+  });
+
+  it('falls back to created_at for rows written before the column existed', async () => {
+    // Historical signals do not gain precision retroactively; they keep the
+    // behaviour they were measured under.
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const { signalId, poolId } = await seedSignal({ createdAt });
+
+    await seedTrade(poolId, {
+      tokens: '1',
+      eth: '0.75',
+      occurredAt: new Date(createdAt.getTime() + 30_000),
+      block: 21,
+    });
+    await recordQuoteSample(db, {
+      chainId: CHAIN,
+      tokenAddress: WETH,
+      priceUsd: parseScaled('2000'),
+      observedAt: new Date(createdAt.getTime() + 30_000),
+    });
+    await setWatermark(new Date(createdAt.getTime() + 60_000));
+
+    const result = await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' });
+    expect(result.status === 'recorded' && result.metrics.tradeCount).toBe(1);
+  });
+
+  it('reconstructs the same window in the repair sweep', async () => {
+    // If the sweep anchored differently from the measurement it would either
+    // miss real damage or invent it, and the repair loop would never settle.
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const blockTime = new Date(createdAt.getTime() - 60_000);
+    const { signalId, poolId } = await seedSignal({ createdAt, signalBlockTime: blockTime });
+
+    await setWatermark(new Date(blockTime.getTime() + 60_000));
+    await evaluateOutcome(db, quotes, config, {
+      signalId,
+      horizon: '1m',
+      now: new Date(blockTime.getTime() + 60_000),
+    });
+
+    // Inside the block-time window, outside the wall-clock one.
+    await seedTrade(poolId, {
+      tokens: '1',
+      eth: '0.75',
+      occurredAt: new Date(blockTime.getTime() + 30_000),
+      block: 22,
+    });
+
+    expect(await damagedOutcomes(db, repairConfig)).toEqual([
+      { signalId, horizon: '1m', reason: 'late_trades' },
+    ]);
+  });
+});
+
+/**
+ * A rollback deletes trades. The `late_trades` detector catches most of the
+ * fallout for free, because re-ingested swaps carry a fresh `created_at` — but
+ * not when the canonical chain has nothing to put back. That is the case where
+ * the recorded number came from swaps that never happened.
+ */
+describe('repair after a reorg rollback', () => {
+  const repairConfig = { lookbackMs: 48 * 3_600_000, limit: 100 };
+
+  const seedRollback = (rewoundToBlockTime: Date | null) =>
+    db.insert(reorgEvents).values({
+      source: SWAP_TAIL_SOURCE,
+      detectedAtBlock: 1_000n,
+      rewoundToBlock: 968n,
+      rewoundToBlockTime,
+      expectedHash: '0xaaa',
+      actualHash: '0xbbb',
+      deletedTrades: 3,
+    });
+
+  it('flags an outcome whose window lost trades and got nothing back', async () => {
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const { signalId } = await seedSignal({ createdAt });
+    await setWatermark(new Date(createdAt.getTime() + 60_000));
+    await evaluateOutcome(db, quotes, config, {
+      signalId,
+      horizon: '1m',
+      now: new Date(createdAt.getTime() + 60_000),
+    });
+
+    // Nothing is re-inserted: no trade looks late, so only the event finds it.
+    await seedRollback(new Date(createdAt.getTime() + 30_000));
+
+    expect(await damagedOutcomes(db, repairConfig)).toEqual([
+      { signalId, horizon: '1m', reason: 'reorg_rollback' },
+    ]);
+  });
+
+  it('leaves an outcome alone when the rollback is entirely after its window', async () => {
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const { signalId, poolId } = await seedSignal({ createdAt });
+    await seedTrade(poolId, {
+      tokens: '1',
+      eth: '0.75',
+      occurredAt: new Date(createdAt.getTime() + 30_000),
+      block: 23,
+    });
+    await recordQuoteSample(db, {
+      chainId: CHAIN,
+      tokenAddress: WETH,
+      priceUsd: parseScaled('2000'),
+      observedAt: new Date(createdAt.getTime() + 30_000),
+    });
+    await setWatermark(new Date(createdAt.getTime() + 60_000));
+    await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' });
+
+    // Rewound to well past the 1m window, so nothing in it was deleted.
+    await seedRollback(new Date(createdAt.getTime() + 10 * 60_000));
+
+    expect(await damagedOutcomes(db, repairConfig)).toEqual([]);
+  });
+
+  it('treats an unknown rewind time as overlapping', async () => {
+    // Re-measuring a healthy row costs one recomputation; skipping a damaged
+    // one leaves a wrong number in the §22 evaluation permanently.
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const { signalId } = await seedSignal({ createdAt });
+    await setWatermark(new Date(createdAt.getTime() + 60_000));
+    await evaluateOutcome(db, quotes, config, {
+      signalId,
+      horizon: '1m',
+      now: new Date(createdAt.getTime() + 60_000),
+    });
+
+    await seedRollback(null);
+
+    expect(await damagedOutcomes(db, repairConfig)).toEqual([
+      { signalId, horizon: '1m', reason: 'reorg_rollback' },
+    ]);
+  });
+
+  it('ignores a rollback that predates the measurement', async () => {
+    // The outcome was measured after the rollback, so it already saw the
+    // canonical history. Flagging it would make the sweep never terminate.
+    await seedRollback(new Date(Date.now() - 60 * 60_000));
+
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const { signalId, poolId } = await seedSignal({ createdAt });
+    await seedTrade(poolId, {
+      tokens: '1',
+      eth: '0.75',
+      occurredAt: new Date(createdAt.getTime() + 30_000),
+      block: 24,
+    });
+    await recordQuoteSample(db, {
+      chainId: CHAIN,
+      tokenAddress: WETH,
+      priceUsd: parseScaled('2000'),
+      observedAt: new Date(createdAt.getTime() + 30_000),
+    });
+    await setWatermark(new Date(createdAt.getTime() + 60_000));
+    await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' });
+
+    expect(await damagedOutcomes(db, repairConfig)).toEqual([]);
   });
 });

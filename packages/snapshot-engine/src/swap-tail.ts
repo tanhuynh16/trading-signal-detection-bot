@@ -1,8 +1,8 @@
-import { and, eq, exists, gte, ne, or, sql } from 'drizzle-orm';
+import { and, eq, exists, gt, gte, ne, or, sql } from 'drizzle-orm';
 import type { Log, PublicClient } from 'viem';
 import { AdaptiveChunkSize, fetchLogsChunked } from '@sdb/blockchain';
-import { advanceCursor, planRange, readCursor } from '@sdb/discovery';
-import { pools, signals, trades, type Database } from '@sdb/database';
+import { advanceCursor, planRange, readCursorState, rewindCursor } from '@sdb/discovery';
+import { pools, reorgEvents, signals, trades, type Database } from '@sdb/database';
 import { decodeSwapLog, SWAP_TOPICS } from '@sdb/market-data';
 import { fromUnixSeconds, withContext, type Address, type Logger } from '@sdb/shared';
 
@@ -37,6 +37,17 @@ export type SwapTailConfig = {
    * are already being scanned, the filter just carries more addresses.
    */
   outcomeRetentionHours: number;
+  /**
+   * Blocks to stay behind head.
+   *
+   * The tail pays this latency where discovery does not, because its rows are
+   * what §21 measures and §22 evaluates, and an outcome is never recomputed
+   * once written. The cost is that the coverage watermark trails head by this
+   * many blocks; Phase 7.1's deferral absorbs it with no new code.
+   */
+  confirmations: number;
+  /** How far back to rewind when a reorg is detected. */
+  reorgDepth: number;
 };
 
 export type SwapTailDeps = {
@@ -87,6 +98,19 @@ export async function trackedPools(
       ),
     );
   return rows as Array<{ id: string; address: Address; dex: string; tokenId: string }>;
+}
+
+/**
+ * The deepest block this source is willing to treat as settled.
+ *
+ * `planRange` applies the same rule to the drain range; this exists for the
+ * two places that need the number without planning a range — the idle-cursor
+ * advance, which must not claim coverage of blocks the tail deliberately has
+ * not read.
+ */
+export function confirmedHead(head: bigint, confirmations: number): bigint {
+  const depth = BigInt(Math.max(0, confirmations));
+  return head > depth ? head - depth : 0n;
 }
 
 function chunk<T>(items: readonly T[], size: number): T[][] {
@@ -152,15 +176,101 @@ async function persistSwaps(
  * window yields many logs from few blocks.
  */
 /**
- * Timestamp of a single block, for the coverage watermark.
+ * Timestamp and hash of a single block, for the coverage watermark and for
+ * reorg detection.
  *
  * One extra getBlock per completed drain — measured cadence is ~5.8s, so about
  * 620 calls an hour, roughly 1% of the free-tier budget. Cheap next to the
- * alternative of an outcome job fetching its own window at horizon time.
+ * alternative of an outcome job fetching its own window at horizon time. The
+ * hash rides along for free: this call was already being made.
  */
-async function headTime(client: PublicClient, block: bigint): Promise<Date> {
+async function blockHeader(
+  client: PublicClient,
+  block: bigint,
+): Promise<{ time: Date; hash: string }> {
   const header = await client.getBlock({ blockNumber: block, includeTransactions: false });
-  return fromUnixSeconds(header.timestamp);
+  if (header.hash === null) {
+    // Only a pending block has a null hash, and we never ask for one.
+    throw new Error(`block ${block} returned without a hash`);
+  }
+  return { time: fromUnixSeconds(header.timestamp), hash: header.hash };
+}
+
+export type RollbackResult = {
+  rewoundTo: bigint;
+  deletedTrades: number;
+  expectedHash: string;
+  actualHash: string;
+};
+
+/**
+ * Has the chain under the cursor changed since we read it?
+ *
+ * A cursor holding only a block number cannot tell: number N always exists,
+ * it is simply a different block after a reorg. Comparing the stored hash makes
+ * this a check rather than an assumption. Confirmations make a reorg rare; only
+ * this makes one detectable.
+ *
+ * Returns null when there is nothing to check — no cursor, or no stored hash
+ * (the first drain after this shipped, or the drain after a rollback). "We
+ * cannot tell" must never be reported as "unchanged", but it is also not
+ * grounds to delete data, so the caller simply proceeds and the next drain
+ * establishes the hash.
+ */
+export async function detectReorg(
+  db: Database,
+  http: PublicClient,
+  source: string,
+  config: { reorgDepth: number },
+): Promise<RollbackResult | null> {
+  const state = await readCursorState(db, source);
+  if (!state || state.lastProcessedBlockHash === null) return null;
+
+  const current = await blockHeader(http, state.lastProcessedBlock);
+  if (current.hash === state.lastProcessedBlockHash) return null;
+
+  const depth = BigInt(Math.max(1, config.reorgDepth));
+  const rewoundTo =
+    state.lastProcessedBlock > depth ? state.lastProcessedBlock - depth : 0n;
+
+  // Read the rewind target's time from the chain rather than reusing anything
+  // stored: the stored watermark belongs to blocks we are about to disown.
+  // A failure here is not fatal — a null time reads as "coverage unknown",
+  // which the gate treats as not-covered, the conservative direction.
+  let rewoundToTime: Date | null = null;
+  try {
+    rewoundToTime = (await blockHeader(http, rewoundTo)).time;
+  } catch {
+    rewoundToTime = null;
+  }
+
+  // Delete first, then rewind. The other order would leave a window in which
+  // the cursor claims less coverage than it has while phantom trades are still
+  // readable — harmless, but the reverse of the invariant everywhere else in
+  // this file, which is "commit rows, then move the watermark".
+  const deleted = await db
+    .delete(trades)
+    .where(gt(trades.blockNumber, rewoundTo))
+    .returning({ id: trades.id });
+
+  await rewindCursor(db, source, rewoundTo, rewoundToTime);
+
+  await db.insert(reorgEvents).values({
+    source,
+    detectedAtBlock: state.lastProcessedBlock,
+    rewoundToBlock: rewoundTo,
+    rewoundToBlockTime: rewoundToTime,
+    expectedHash: state.lastProcessedBlockHash,
+    actualHash: current.hash,
+    deletedTrades: deleted.length,
+  });
+
+  return {
+    rewoundTo,
+    deletedTrades: deleted.length,
+    expectedHash: state.lastProcessedBlockHash,
+    actualHash: current.hash,
+  };
 }
 
 async function blockTimestamps(client: PublicClient, logs: Log[]): Promise<Map<string, Date>> {
@@ -188,26 +298,58 @@ export class SwapTail {
     const logger = withContext(this.deps.logger, { source: SWAP_TAIL_SOURCE });
 
     try {
+      // Before anything else: is the chain we already indexed still the chain?
+      // Doing this first means a drain never appends to a history it is about
+      // to disown.
+      const rollback = await detectReorg(
+        this.deps.db,
+        this.deps.http,
+        SWAP_TAIL_SOURCE,
+        this.deps.config,
+      );
+      if (rollback) {
+        logger.warn(
+          {
+            rewoundTo: rollback.rewoundTo,
+            deletedTrades: rollback.deletedTrades,
+            expectedHash: rollback.expectedHash,
+            actualHash: rollback.actualHash,
+          },
+          'reorg detected; rolled back swap tail and deleted affected trades',
+        );
+      }
+
       const tracked = await trackedPools(this.deps.db, this.deps.config);
       if (tracked.length === 0) {
-        // Nothing to watch. Keep the cursor at head so that when pools do
-        // appear we do not replay a long idle stretch. Coverage up to head is
+        // Nothing to watch. Keep the cursor near head so that when pools do
+        // appear we do not replay a long idle stretch. Coverage up to there is
         // still complete — vacuously, since there was nothing to collect — so
-        // the time watermark advances too (§21).
-        await advanceCursor(this.deps.db, SWAP_TAIL_SOURCE, head, await headTime(this.deps.http, head));
+        // the time watermark advances too (§21). It stops at the confirmed
+        // head, not the raw one, or the watermark would claim coverage of
+        // blocks the tail has deliberately not read yet.
+        const idle = confirmedHead(head, this.deps.config.confirmations);
+        const header = await blockHeader(this.deps.http, idle);
+        await advanceCursor(
+          this.deps.db,
+          SWAP_TAIL_SOURCE,
+          idle,
+          header.time,
+          header.hash,
+        );
         return { swaps: 0 };
       }
 
       const byAddress = new Map(tracked.map((p) => [p.address, { id: p.id }]));
-      const lastProcessed = await readCursor(this.deps.db, SWAP_TAIL_SOURCE);
+      const cursor = await readCursorState(this.deps.db, SWAP_TAIL_SOURCE);
       const plan = planRange({
-        lastProcessed,
+        lastProcessed: cursor?.lastProcessedBlock ?? null,
         head,
         overlapBlocks: 0,
         // On first sight, start at head: back-filling trades for pools we were
         // not tracking yet would be wasted requests.
         firstStartBackfillBlocks: 0,
         isFirstDrain,
+        confirmations: this.deps.config.confirmations,
       });
       if (plan.fromBlock > plan.toBlock) return { swaps: 0 };
 
@@ -251,16 +393,20 @@ export class SwapTail {
       }
 
       // Every batch finished without throwing, so coverage really does reach
-      // head. Only now is it safe to stamp the time watermark: §21 outcome
-      // measurement gates on it, and claiming coverage the tail does not have
-      // would let an outcome be finalised from an incomplete price path — the
-      // exact defect this guards (ADR 0020). A mid-drain failure throws before
-      // reaching here and leaves the older, conservative value in place.
+      // plan.toBlock. Only now is it safe to stamp the time watermark: §21
+      // outcome measurement gates on it, and claiming coverage the tail does
+      // not have would let an outcome be finalised from an incomplete price
+      // path — the exact defect this guards (ADR 0020). A mid-drain failure
+      // throws before reaching here and leaves the older, conservative value in
+      // place. The hash is stamped in the same write, so the next drain can ask
+      // whether this block is still the one we read.
+      const watermark = await blockHeader(this.deps.http, plan.toBlock);
       await advanceCursor(
         this.deps.db,
         SWAP_TAIL_SOURCE,
         plan.toBlock,
-        await headTime(this.deps.http, plan.toBlock),
+        watermark.time,
+        watermark.hash,
       );
 
       // Outcome retention (§21) keeps pools in the filter long after discovery,
