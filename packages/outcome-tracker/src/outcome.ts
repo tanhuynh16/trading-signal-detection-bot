@@ -10,7 +10,12 @@ import {
 } from '@sdb/database';
 import { toColumn } from '@sdb/market-data';
 import { InvalidDataError, parseScaled } from '@sdb/shared';
-import { decideCoverage, tailWatermark, type CoverageConfig } from './coverage.js';
+import {
+  decideCoverage,
+  gapOverlaps,
+  tailWatermark,
+  type CoverageConfig,
+} from './coverage.js';
 import { horizonMs } from './horizons.js';
 import {
   baseIsToken0,
@@ -128,7 +133,15 @@ export async function evaluateOutcome(
     ...(input.now ? { now: input.now } : {}),
   });
 
-  if (!coverage.ready && !coverage.giveUp) {
+  // A skipped range is not lateness, so deferring for it would only burn the
+  // whole maxDeferMs budget before recording the same thing. The provider has
+  // pruned those blocks (ADR 0023) — they are never arriving — so this short-
+  // circuits straight to the recorded reason.
+  const skipped = config.coverage.enabled
+    ? await gapOverlaps(db, { start: windowStart, end: windowEnd })
+    : false;
+
+  if (!skipped && !coverage.ready && !coverage.giveUp) {
     return {
       status: 'deferred',
       horizon: input.horizon,
@@ -163,10 +176,12 @@ export async function evaluateOutcome(
       ? await loadSamples(db, row.quoteTokenAddress, windowStart, windowEnd, config.maxSampleAgeMs)
       : [];
 
-  const metrics = !coverage.ready
-    ? // Waited past the cap and the tail never got there — a stalled drain, or
-      // a pool aged out of retention. Record why rather than publishing a
-      // number derived from a window we know is short (§27).
+  const metrics = skipped || !coverage.ready
+    ? // Either the tail never got there before the cap — a stalled drain, or a
+      // pool aged out of retention — or the range was skipped outright because
+      // the provider pruned it. Both mean the same thing to a reader: this
+      // window's history is incomplete, so record why rather than publishing a
+      // number derived from it (§27).
       unmeasurable('incomplete_tail_coverage', swaps.length)
     : row.tokenDecimals === null
       ? // Without decimals every amount is off by an unknown power of ten.

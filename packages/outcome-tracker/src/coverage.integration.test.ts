@@ -5,6 +5,7 @@ import {
   discoveryCursors,
   featureSets,
   pools,
+  ingestionGaps,
   quotePriceSamples,
   reorgEvents,
   riskResults,
@@ -124,11 +125,13 @@ beforeEach(async () => {
   await db.execute(truncate);
   await cleanCursors();
   await db.delete(reorgEvents).where(eq(reorgEvents.source, SWAP_TAIL_SOURCE));
+  await db.delete(ingestionGaps).where(eq(ingestionGaps.source, SWAP_TAIL_SOURCE));
 });
 afterAll(async () => {
   await db.execute(truncate);
   await cleanCursors();
   await db.delete(reorgEvents).where(eq(reorgEvents.source, SWAP_TAIL_SOURCE));
+  await db.delete(ingestionGaps).where(eq(ingestionGaps.source, SWAP_TAIL_SOURCE));
   await close();
 });
 
@@ -578,5 +581,107 @@ describe('repair after a reorg rollback', () => {
     await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' });
 
     expect(await damagedOutcomes(db, repairConfig)).toEqual([]);
+  });
+});
+
+/**
+ * A skipped range is not lateness. When the provider has pruned the blocks
+ * (ADR 0023) they are never arriving, so the watermark — which only ever
+ * answers "how far has ingestion reached?" — can sail past a window whose
+ * blocks were never actually read. These cases pin the difference.
+ */
+describe('a window overlapping an ingestion gap is not covered', () => {
+  const seedGap = (from: Date | null, to: Date | null) =>
+    db.insert(ingestionGaps).values({
+      source: SWAP_TAIL_SOURCE,
+      fromBlock: 100n,
+      toBlock: 5_000n,
+      fromTime: from,
+      toTime: to,
+      reason: 'provider history window exceeded',
+    });
+
+  it('records the reason instead of a number', async () => {
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const { signalId } = await seedSignal({ createdAt });
+    // The watermark is well past the window: without the gap this would be a
+    // clean, confident measurement.
+    await setWatermark(new Date(createdAt.getTime() + 10 * 60_000));
+    await seedGap(
+      new Date(createdAt.getTime() - 60_000),
+      new Date(createdAt.getTime() + 30_000),
+    );
+
+    const result = await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' });
+
+    expect(result.status).toBe('recorded');
+    if (result.status === 'recorded') {
+      expect(result.metrics.failureReason).toBe('incomplete_tail_coverage');
+      expect(result.metrics.returnPct).toBeNull();
+    }
+  });
+
+  it('does not defer — those blocks are never coming back', async () => {
+    // Deferring would burn the whole maxDeferMs budget and then record exactly
+    // the same thing.
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const { signalId } = await seedSignal({ createdAt });
+    await setWatermark(new Date(createdAt.getTime() - 60_000)); // tail behind
+    await seedGap(
+      new Date(createdAt.getTime() - 60_000),
+      new Date(createdAt.getTime() + 30_000),
+    );
+
+    expect((await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' })).status)
+      .toBe('recorded');
+  });
+
+  it('leaves a window clear of the gap alone', async () => {
+    // The guard must not swallow healthy measurements.
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const { signalId, poolId } = await seedSignal({ createdAt });
+    await seedTrade(poolId, {
+      tokens: '1',
+      eth: '0.75',
+      occurredAt: new Date(createdAt.getTime() + 30_000),
+      block: 30,
+    });
+    await recordQuoteSample(db, {
+      chainId: CHAIN,
+      tokenAddress: WETH,
+      priceUsd: parseScaled('2000'),
+      observedAt: new Date(createdAt.getTime() + 30_000),
+    });
+    await setWatermark(new Date(createdAt.getTime() + 60_000));
+    // Gap sits hours before this signal.
+    await seedGap(
+      new Date(createdAt.getTime() - 4 * 3_600_000),
+      new Date(createdAt.getTime() - 3 * 3_600_000),
+    );
+
+    const result = await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' });
+    expect(result.status === 'recorded' && result.metrics.returnPct).toBe('50');
+  });
+
+  it('treats an unknown gap bound as overlapping', async () => {
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const { signalId } = await seedSignal({ createdAt });
+    await setWatermark(new Date(createdAt.getTime() + 10 * 60_000));
+    await seedGap(null, null);
+
+    const result = await evaluateOutcome(db, quotes, config, { signalId, horizon: '1m' });
+    expect(result.status === 'recorded' && result.metrics.failureReason)
+      .toBe('incomplete_tail_coverage');
+  });
+
+  it('is ignored entirely when the coverage gate is disabled', async () => {
+    // The escape hatch stays honest about restoring pre-gate behaviour.
+    const createdAt = new Date(Date.now() - 30 * 60_000);
+    const { signalId } = await seedSignal({ createdAt });
+    await seedGap(new Date(createdAt.getTime() - 60_000), new Date(createdAt.getTime() + 30_000));
+
+    const off = { ...config, coverage: { ...gate, enabled: false } };
+    const result = await evaluateOutcome(db, quotes, off, { signalId, horizon: '1m' });
+    expect(result.status === 'recorded' && result.metrics.failureReason).toBeNull();
   });
 });

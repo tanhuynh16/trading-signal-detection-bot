@@ -1,9 +1,15 @@
 import type { PublicClient } from 'viem';
 import type { Database } from '@sdb/database';
 import { AdaptiveChunkSize, fetchLogsChunked } from '@sdb/blockchain';
-import { isRetryable, withContext, type Logger } from '@sdb/shared';
+import {
+  ProviderHistoryUnavailableError,
+  isRetryable,
+  withContext,
+  type Logger,
+} from '@sdb/shared';
 import { decoderFor } from './adapters.js';
 import { advanceCursor, planRange, readCursor } from './cursor.js';
+import { recordHistoryGap } from './history-gap.js';
 import { FACTORIES, type FactoryDefinition } from './factories.js';
 import { normalizePoolCreation, shouldAcceptPool } from './normalize.js';
 import { persistCandidate } from './persist.js';
@@ -85,7 +91,8 @@ export async function drainFactory(
   let scanned = 0;
   let discovered = 0;
 
-  await fetchLogsChunked(
+  try {
+    await fetchLogsChunked(
     http,
     {
       address: factory.address,
@@ -110,9 +117,49 @@ export async function drainFactory(
       // Committed this window; safe to move the watermark.
       await advanceCursor(db, factory.source, range.toBlock);
     },
-  );
+    );
+  } catch (error) {
+    if (!(error instanceof ProviderHistoryUnavailableError)) throw error;
+
+    // The provider has pruned the blocks this cursor is waiting on, so no
+    // number of retries reaches them. Skip to a block it can still serve and
+    // record what was lost; retrying instead is what turned a 4.3-minute
+    // outage into a permanent stall (ADR 0023).
+    const reseedTo = safeReseedTarget(head, config);
+    logger.warn(
+      {
+        from: plan.fromBlock,
+        to: plan.toBlock,
+        reseedTo,
+        cause: error.context['cause'],
+      },
+      'block range beyond provider history; skipping forward and recording the gap',
+    );
+    await recordHistoryGap(db, {
+      source: factory.source,
+      fromBlock: plan.fromBlock,
+      toBlock: reseedTo,
+      reason: 'provider history window exceeded',
+      reseedTo,
+    });
+  }
 
   return { scanned, discovered };
+}
+
+/**
+ * Where a skipping cursor should land: inside the provider's window, but far
+ * enough back to keep the first-start backfill's usefulness. Reusing
+ * `firstStartBackfillBlocks` is deliberate — it is already the answer to "how
+ * far back can this provider serve?", and it must stay inside the window or the
+ * very next drain fails the same way.
+ */
+function safeReseedTarget(
+  head: bigint,
+  config: { firstStartBackfillBlocks: number },
+): bigint {
+  const back = BigInt(Math.max(0, config.firstStartBackfillBlocks));
+  return head > back ? head - back : 0n;
 }
 
 async function handleLog(

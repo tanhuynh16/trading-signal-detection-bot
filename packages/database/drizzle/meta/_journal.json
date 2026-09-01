@@ -64,6 +64,13 @@
       "when": 1788166265249,
       "tag": "0008_block_time_anchor_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788256589396,
+      "tag": "0009_worried_firebrand",
+      "breakpoints": true
     }
   ]
 }

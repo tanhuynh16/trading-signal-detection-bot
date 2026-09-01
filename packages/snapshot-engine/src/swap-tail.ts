@@ -1,10 +1,22 @@
 import { and, eq, exists, gt, gte, ne, or, sql } from 'drizzle-orm';
 import type { Log, PublicClient } from 'viem';
 import { AdaptiveChunkSize, fetchLogsChunked } from '@sdb/blockchain';
-import { advanceCursor, planRange, readCursorState, rewindCursor } from '@sdb/discovery';
+import {
+  advanceCursor,
+  planRange,
+  readCursorState,
+  recordHistoryGap,
+  rewindCursor,
+} from '@sdb/discovery';
 import { pools, reorgEvents, signals, trades, type Database } from '@sdb/database';
 import { decodeSwapLog, SWAP_TOPICS } from '@sdb/market-data';
-import { fromUnixSeconds, withContext, type Address, type Logger } from '@sdb/shared';
+import {
+  ProviderHistoryUnavailableError,
+  fromUnixSeconds,
+  withContext,
+  type Address,
+  type Logger,
+} from '@sdb/shared';
 
 export const SWAP_TAIL_SOURCE = 'swap-tail';
 
@@ -292,6 +304,53 @@ export class SwapTail {
     this.sizer = new AdaptiveChunkSize(deps.config.logChunkBlocks);
   }
 
+  /**
+   * The provider no longer holds the blocks this cursor is waiting on.
+   *
+   * Skipping is the only way forward, but for the tail a bare skip is unsafe:
+   * §21's coverage watermark is a single instant meaning "everything up to here
+   * was read and committed", and letting it advance over a range the tail never
+   * fetched would certify outcome windows built from missing trades. So the
+   * skipped range is recorded with its BLOCK-TIME bounds — the clock the
+   * coverage gate and `trades.occurred_at` both use — and `reseedCursor`
+   * deliberately leaves the time watermark where it was.
+   *
+   * The bounds are best-effort: if either boundary block cannot be read, the
+   * bound stays null, which the gate treats as overlapping. Re-measuring a
+   * healthy outcome costs one recomputation; certifying a damaged one is
+   * permanent.
+   */
+  private async skipUnservable(
+    fromBlock: bigint,
+    head: bigint,
+    logger: Logger,
+  ): Promise<void> {
+    const reseedTo = confirmedHead(head, this.deps.config.confirmations);
+    const bound = async (block: bigint): Promise<Date | null> => {
+      try {
+        return (await blockHeader(this.deps.http, block)).time;
+      } catch {
+        return null;
+      }
+    };
+    const [fromTime, toTime] = await Promise.all([bound(fromBlock), bound(reseedTo)]);
+
+    logger.warn(
+      { fromBlock, toBlock: reseedTo, fromTime, toTime },
+      'swap tail range beyond provider history; skipping forward and recording the gap',
+    );
+
+    await recordHistoryGap(this.deps.db, {
+      source: SWAP_TAIL_SOURCE,
+      fromBlock,
+      toBlock: reseedTo,
+      fromTime,
+      toTime,
+      reason: 'provider history window exceeded',
+      reseedTo,
+    });
+  }
+
   async drain(head: bigint, isFirstDrain: boolean): Promise<{ swaps: number }> {
     if (this.draining) return { swaps: 0 };
     this.draining = true;
@@ -359,8 +418,9 @@ export class SwapTail {
         this.deps.config.maxAddressesPerQuery,
       );
 
-      for (const addresses of batches) {
-        await fetchLogsChunked(
+      try {
+        for (const addresses of batches) {
+          await fetchLogsChunked(
           this.deps.http,
           {
             address: addresses,
@@ -389,7 +449,12 @@ export class SwapTail {
               await advanceCursor(this.deps.db, SWAP_TAIL_SOURCE, range.toBlock);
             }
           },
-        );
+          );
+        }
+      } catch (error) {
+        if (!(error instanceof ProviderHistoryUnavailableError)) throw error;
+        await this.skipUnservable(plan.fromBlock, head, logger);
+        return { swaps: total };
       }
 
       // Every batch finished without throwing, so coverage really does reach

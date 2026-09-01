@@ -29,6 +29,7 @@ repository deviates, the reason is in [`docs/adr/`](docs/adr/).
 | 7.1   | Outcome coverage gate + self-healing repair                      | **done**    |
 | 8     | Strategy evaluation                                              | **done**    |
 | 9     | Reorg safety and block-time outcome windows                      | **done**    |
+| 9.1   | Provider history window; Phase 9 verified live                   | **done**    |
 
 Per spec §29, phases land one at a time with review in between. Full detail in
 [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).

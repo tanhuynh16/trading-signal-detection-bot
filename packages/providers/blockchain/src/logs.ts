@@ -1,5 +1,5 @@
 import type { AbiEvent, Address, Hex, Log, PublicClient } from 'viem';
-import { TransientProviderError } from '@sdb/shared';
+import { ProviderHistoryUnavailableError, TransientProviderError } from '@sdb/shared';
 
 export type LogRange = { fromBlock: bigint; toBlock: bigint };
 
@@ -46,12 +46,26 @@ export class AdaptiveChunkSize {
 
 const RANGE_ERROR = /block range|range too large|up to a \d+ block|query returned more than|limit exceeded/i;
 const RATE_LIMIT_ERROR = /429|rate ?limit|too many requests|capacity|timeout|ETIMEDOUT|ECONNRESET/i;
+/**
+ * The provider no longer holds these blocks — a non-archive node has pruned
+ * them. Checked BEFORE the range and rate-limit patterns, because providers
+ * word this in ways that collide with both: Chainstack answers
+ * "Archive, Debug and Trace requests are not available on your current plan",
+ * which contains neither, while others say "missing trie node" or
+ * "state is not available". Halving the chunk or backing off cannot help, so
+ * misclassifying it is what turns a 4.3-minute outage into a permanent stall.
+ */
+const HISTORY_ERROR =
+  /archive|missing trie node|state (?:is )?(?:not available|unavailable)|pruned|older than|beyond the (?:last|available)|header not found/i;
 
 function text(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 function isRangeError(error: unknown): boolean {
   return RANGE_ERROR.test(text(error));
+}
+function isHistoryUnavailable(error: unknown): boolean {
+  return HISTORY_ERROR.test(text(error));
 }
 function isRateLimited(error: unknown): boolean {
   return RATE_LIMIT_ERROR.test(text(error));
@@ -124,9 +138,28 @@ export async function fetchLogsChunked(
         toBlock: range.toBlock,
       } as Parameters<PublicClient['getLogs']>[0]);
     } catch (error) {
+      // First: is this range gone for good? Shrinking or backing off would
+      // both loop forever on a pruned block.
+      if (isHistoryUnavailable(error)) {
+        throw new ProviderHistoryUnavailableError(
+          `eth_getLogs beyond provider history [${range.fromBlock}, ${range.toBlock}]`,
+          {
+            fromBlock: range.fromBlock.toString(),
+            toBlock: range.toBlock.toString(),
+            cause: text(error),
+          },
+        );
+      }
       if (isRangeError(error) && sizing.canShrink()) {
+        // Shrink FIRST, then notify. Written as
+        // `options.onChunkShrink?.(before, sizing.shrink())` the optional call
+        // short-circuits its own arguments: with no callback supplied,
+        // `shrink()` never ran, the window never narrowed, and the loop retried
+        // the identical range forever. Production callers happen to pass a
+        // logger, which is the only reason this was survivable.
         const before = sizing.value;
-        options.onChunkShrink?.(before, sizing.shrink());
+        const after = sizing.shrink();
+        options.onChunkShrink?.(before, after);
         continue; // retry the same cursor with a smaller window
       }
       // Spec §23: back off on transient failures, bounded — never forever.

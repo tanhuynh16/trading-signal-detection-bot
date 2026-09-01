@@ -1,13 +1,15 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { inArray } from 'drizzle-orm';
-import { createDatabase, discoveryCursors } from '@sdb/database';
+import { eq, inArray } from 'drizzle-orm';
+import { createDatabase, discoveryCursors, ingestionGaps, jobsAudit } from '@sdb/database';
 import {
   advanceCursor,
   planRange,
   readCursor,
   readCursorState,
+  reseedCursor,
   rewindCursor,
 } from './cursor.js';
+import { recordHistoryGap } from './history-gap.js';
 
 /**
  * Spec §10.3: "restarting the worker does not permanently skip blocks."
@@ -27,8 +29,11 @@ const SOURCE = 'test-factory';
  * a product bug.
  */
 const OWNED = [SOURCE, 'uniswap-v2', 'aerodrome'];
-const clean = () =>
-  db.delete(discoveryCursors).where(inArray(discoveryCursors.source, OWNED));
+const clean = async () => {
+  await db.delete(discoveryCursors).where(inArray(discoveryCursors.source, OWNED));
+  await db.delete(ingestionGaps).where(inArray(ingestionGaps.source, OWNED));
+  await db.delete(jobsAudit).where(inArray(jobsAudit.queue, OWNED));
+};
 
 beforeEach(async () => {
   await clean();
@@ -194,5 +199,103 @@ describe('rewindCursor — the one case advanceCursor refuses', () => {
     await rewindCursor(db, SOURCE, 400n, null);
 
     expect(await readCursor(db, 'uniswap-v2')).toBe(900n);
+  });
+});
+
+/**
+ * A non-archive provider prunes blocks — measured at ~128 on Chainstack's plan,
+ * about 4.3 minutes on Base. A cursor left outside that window can only be
+ * skipped forward, and the whole risk of skipping is quietly implying the
+ * skipped range was read (ADR 0023).
+ */
+describe('reseedCursor — skipping forward over pruned blocks', () => {
+  it('moves the cursor forward past a gap', async () => {
+    await advanceCursor(db, SOURCE, 100n, new Date('2026-01-01T00:00:00Z'), '0xaaa');
+    await reseedCursor(db, SOURCE, 5_000n);
+
+    expect(await readCursor(db, SOURCE)).toBe(5_000n);
+  });
+
+  it('leaves the time watermark exactly where it was', async () => {
+    // The whole point. Advancing it would claim §21 coverage over blocks that
+    // were never fetched, which is the one thing the gate exists to prevent.
+    const known = new Date('2026-01-01T00:00:00Z');
+    await advanceCursor(db, SOURCE, 100n, known, '0xaaa');
+    await reseedCursor(db, SOURCE, 5_000n);
+
+    const state = await readCursorState(db, SOURCE);
+    expect(state?.lastProcessedBlockTime).toEqual(known);
+    expect(state?.lastProcessedBlock).toBe(5_000n);
+  });
+
+  it('clears the hash, which described a block the cursor has left', async () => {
+    await advanceCursor(db, SOURCE, 100n, new Date('2026-01-01T00:00:00Z'), '0xaaa');
+    await reseedCursor(db, SOURCE, 5_000n);
+
+    expect((await readCursorState(db, SOURCE))?.lastProcessedBlockHash).toBeNull();
+  });
+
+  it('creates the row when no cursor existed', async () => {
+    await reseedCursor(db, SOURCE, 5_000n);
+    expect(await readCursor(db, SOURCE)).toBe(5_000n);
+  });
+
+  it('leaves other sources alone', async () => {
+    await advanceCursor(db, 'uniswap-v2', 900n);
+    await reseedCursor(db, SOURCE, 5_000n);
+    expect(await readCursor(db, 'uniswap-v2')).toBe(900n);
+  });
+});
+
+describe('recordHistoryGap', () => {
+  const gap = {
+    source: SOURCE,
+    fromBlock: 101n,
+    toBlock: 4_999n,
+    fromTime: new Date('2026-01-01T00:00:00Z'),
+    toTime: new Date('2026-01-01T02:43:00Z'),
+    reason: 'provider history window exceeded',
+    reseedTo: 5_000n,
+  };
+
+  it('records the skipped range and moves the cursor in one go', async () => {
+    await advanceCursor(db, SOURCE, 100n, new Date('2026-01-01T00:00:00Z'), '0xaaa');
+    await recordHistoryGap(db, gap);
+
+    const [row] = await db.select().from(ingestionGaps).where(eq(ingestionGaps.source, SOURCE));
+    expect(row?.fromBlock).toBe(101n);
+    expect(row?.toBlock).toBe(4_999n);
+    expect(row?.fromTime).toEqual(gap.fromTime);
+    expect(await readCursor(db, SOURCE)).toBe(5_000n);
+  });
+
+  it('audits the skip as a permanent failure (§23)', async () => {
+    // A skip is data loss. It belongs in the same place every other permanent
+    // failure is recorded, not only in a log line that scrolls away.
+    await recordHistoryGap(db, gap);
+
+    const [audit] = await db.select().from(jobsAudit).where(eq(jobsAudit.queue, SOURCE));
+    expect(audit?.status).toBe('permanent_failure');
+    expect(audit?.errorCode).toBe('PROVIDER_HISTORY_UNAVAILABLE');
+  });
+
+  it('records no gap when the cursor was already inside the window', async () => {
+    // fromBlock > toBlock means nothing was actually missed. A zero-width row
+    // would make every overlap check true for an instant that never went
+    // unread.
+    await recordHistoryGap(db, { ...gap, fromBlock: 6_000n, toBlock: 5_000n });
+
+    expect(await db.select().from(ingestionGaps).where(eq(ingestionGaps.source, SOURCE)))
+      .toHaveLength(0);
+    // The cursor still moves — that is the caller's intent either way.
+    expect(await readCursor(db, SOURCE)).toBe(5_000n);
+  });
+
+  it('keeps null time bounds rather than inventing them', async () => {
+    await recordHistoryGap(db, { ...gap, fromTime: null, toTime: null });
+
+    const [row] = await db.select().from(ingestionGaps).where(eq(ingestionGaps.source, SOURCE));
+    expect(row?.fromTime).toBeNull();
+    expect(row?.toTime).toBeNull();
   });
 });

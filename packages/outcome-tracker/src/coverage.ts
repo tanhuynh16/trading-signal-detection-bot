@@ -1,4 +1,5 @@
-import type { Database } from '@sdb/database';
+import { and, eq, gte, isNull, lte, or } from 'drizzle-orm';
+import { ingestionGaps, type Database } from '@sdb/database';
 import { readCursorState } from '@sdb/discovery';
 import { SWAP_TAIL_SOURCE } from '@sdb/snapshot-engine';
 
@@ -76,4 +77,41 @@ export function decideCoverage(input: {
 export async function tailWatermark(db: Database): Promise<Date | null> {
   const state = await readCursorState(db, SWAP_TAIL_SOURCE);
   return state?.lastProcessedBlockTime ?? null;
+}
+
+/**
+ * Does a recorded ingestion gap fall inside this window?
+ *
+ * The watermark answers "how far has ingestion reached?", which is the wrong
+ * question once a range has been skipped: the tail may be far ahead of a window
+ * whose blocks it never actually read. A skip only happens when the provider
+ * has pruned the blocks (ADR 0023), so the range is not merely late — it is
+ * never coming.
+ *
+ * A gap with a null bound is treated as overlapping. The bound is null only
+ * when the boundary block's timestamp could not be read, and an unknown edge
+ * must not be resolved in favour of "covered".
+ */
+export async function gapOverlaps(
+  db: Database,
+  window: { start: Date; end: Date },
+): Promise<boolean> {
+  const rows = await db
+    .select({ id: ingestionGaps.id })
+    .from(ingestionGaps)
+    .where(
+      and(
+        eq(ingestionGaps.source, SWAP_TAIL_SOURCE),
+        or(
+          isNull(ingestionGaps.fromTime),
+          lte(ingestionGaps.fromTime, window.end),
+        ),
+        or(
+          isNull(ingestionGaps.toTime),
+          gte(ingestionGaps.toTime, window.start),
+        ),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
 }

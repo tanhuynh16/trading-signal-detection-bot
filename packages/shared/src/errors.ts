@@ -40,6 +40,24 @@ export class ResourceGoneError extends SdbError {
   readonly retryable = false;
 }
 
+/**
+ * The provider is healthy but no longer holds the blocks being asked for.
+ *
+ * Distinct from `TransientProviderError` because retrying is not merely
+ * wasteful, it can never succeed: a non-archive node has pruned that state and
+ * no amount of backoff brings it back. Measured on Chainstack's plan, history
+ * reaches only ~128 blocks (~4.3 minutes on Base), so a cursor that falls
+ * outside the window would otherwise retry every drain forever, making no
+ * progress and reporting nothing more useful than "drain failed" (ADR 0023).
+ *
+ * The caller's correct response is to skip forward and record the gap, never to
+ * retry and never to pretend the skipped range was read.
+ */
+export class ProviderHistoryUnavailableError extends SdbError {
+  readonly code = 'PROVIDER_HISTORY_UNAVAILABLE';
+  readonly retryable = false;
+}
+
 export function isRetryable(error: unknown): boolean {
   return error instanceof SdbError ? error.retryable : true;
 }

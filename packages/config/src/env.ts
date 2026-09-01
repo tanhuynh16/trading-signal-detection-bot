@@ -103,14 +103,18 @@ const envSchema = z.object({
   // avoid that is a bad trade. The swap tail makes the opposite trade below.
   DISCOVERY_CONFIRMATIONS: z.coerce.number().int().nonnegative().default(0),
 
-  // On first start there is no cursor. Seeding at head - N surfaces real pools
-  // within minutes instead of idling until a launch happens. ~1h at 2s blocks.
-  DISCOVERY_FIRST_START_BACKFILL_BLOCKS: z.coerce.number().int().nonnegative().default(300),
+  // On first start there is no cursor, and this is also where a cursor lands
+  // after skipping blocks the provider has pruned (ADR 0023) — so it must stay
+  // inside the provider's history window or the next drain fails identically.
+  // Measured: Chainstack's plan serves ~128 blocks, so 100 leaves headroom.
+  DISCOVERY_FIRST_START_BACKFILL_BLOCKS: z.coerce.number().int().nonnegative().default(100),
 
-  // Providers cap eth_getLogs span and the cap is plan-dependent: Alchemy's
-  // free tier allows 10 blocks, paid tiers far more. The fetcher halves this
-  // automatically when rejected, so an optimistic value self-corrects.
-  DISCOVERY_LOG_CHUNK_BLOCKS: z.coerce.number().int().positive().default(10),
+  // Providers cap eth_getLogs span and the cap is plan-dependent. Measured:
+  // Alchemy's free tier allows 10 blocks, Chainstack's ~100 (it rejects 121
+  // with "Block range limit exceeded"). The fetcher halves this automatically
+  // when rejected, so an optimistic value self-corrects at the cost of one
+  // probe request per halving.
+  DISCOVERY_LOG_CHUNK_BLOCKS: z.coerce.number().int().positive().default(100),
 
   // Fallback drain cadence when no new head arrives (dead socket, §10.2).
   DISCOVERY_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(15_000),

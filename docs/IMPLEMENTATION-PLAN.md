@@ -23,6 +23,7 @@ gap resolutions below by their G-numbers.
 | 7.1 | Outcome coverage gate + self-healing repair | **done** |
 | 8 | Strategy evaluation | **done** |
 | 9 | Reorg safety and block-time outcome windows | **done** |
+| 9.1 | Provider history window; Phase 9 verified live | **done** |
 | R | Replay/backfill harness (cross-cutting) | not started |
 
 All nine numbered phases are complete; §26 defines through Phase 8, and Phase 9
@@ -430,10 +431,38 @@ that produced each signal.
 Full reasoning, including what was deliberately left for a human decision:
 [ADR 0022](adr/0022-reorg-safety-and-block-time-windows.md).
 
-*Known limitation:* live verification against Base could not be run — the
-Alchemy free tier hit its monthly capacity limit. §29 forbids silently choosing
-a paid tier, so chain-facing behaviour rests on integration tests against a fake
-chain until an endpoint is available.
+*Verified live in Phase 9.1* once an endpoint was available — see below.
+
+### Phase 9.1 — Provider history window, and Phase 9 verified live ✅
+The HTTP endpoint moved to Chainstack, which trades archive depth for range
+width. Measured: `eth_getLogs` width **~100 blocks** (vs Alchemy's 10) but
+history only **~128 blocks**, about **4.3 minutes** on Base.
+
+That combination exposed a stall. The fetcher classified Chainstack's width
+error as a range error and halved correctly, but its *archive* error matched
+neither the range nor the rate-limit pattern, so a cursor outside the window
+retried forever with no progress — which every cursor was, being 4–5.7 days
+stale. `ProviderHistoryUnavailableError` now names that condition,
+`reseedCursor` skips past it, and the skipped range is recorded in
+`ingestion_gaps` so §21's coverage gate reports `incomplete_tail_coverage`
+instead of measuring a window whose blocks were never fetched. Chunk size and
+first-start backfill moved to 100 to match the measured limits.
+
+Testing this turned up a live bug in the fetcher:
+`onChunkShrink?.(before, sizing.shrink())` — **optional-call short-circuiting
+skips the arguments**, so with no callback the chunk never shrank and the loop
+spun forever. Only survivable because production callers all pass a logger.
+
+Live results: 108 pools, 96 trades and 92 signals in ~15 minutes with zero
+errors and zero chunk shrinks; **92 of 92 signals carried `signal_block_time`
+with 0.4–4.8s skew and none over 60s**, against 104 of 1095 over 60s (worst
+7208s) before Phase 9; and a forced rollback deleted 10 trades, recorded one
+audited event, did not cascade, and restored exactly those 10 on the next drain.
+Full detail: [ADR 0023](adr/0023-provider-history-window.md).
+
+*Known limitation:* the ~4.3-minute history window means an outage longer than
+that costs a recorded gap rather than a catch-up. An archive fallback provider
+is the open option if soaks prove that too tight.
 
 ### Cross-cutting
 Built into each phase, not deferred: the six §23 queues with idempotent job IDs,

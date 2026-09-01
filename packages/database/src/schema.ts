@@ -143,6 +143,47 @@ export const reorgEvents = pgTable(
   }),
 );
 
+/**
+ * Block ranges ingestion skipped, and therefore never read.
+ *
+ * A cursor that falls outside the provider's history window cannot be caught
+ * up: the blocks are pruned. The only way forward is to skip to head — but the
+ * §21 coverage watermark is a single instant, and ADR 0020 defines it as *proof*
+ * that everything up to it was read and committed. A scalar cannot express
+ * "covered, gap, covered", so letting the watermark sail past a skipped range
+ * would certify windows whose trades were never ingested — ADR 0020's defect
+ * arriving by a third route.
+ *
+ * Recording the gap is what keeps the watermark honest: an outcome window
+ * overlapping one of these rows reports `incomplete_tail_coverage` (§27) rather
+ * than a number derived from history that was never read.
+ */
+export const ingestionGaps = pgTable(
+  'ingestion_gaps',
+  {
+    id: serial('id').primaryKey(),
+    /** Cursor source that skipped, e.g. 'swap-tail'. */
+    source: text('source').notNull(),
+    /** First block NOT read (the cursor's old position + 1). */
+    fromBlock: bigint('from_block', { mode: 'bigint' }).notNull(),
+    /** Last block not read (the reseed target - 1). */
+    toBlock: bigint('to_block', { mode: 'bigint' }).notNull(),
+    /**
+     * Block-time bounds of the gap, so the coverage gate can compare against an
+     * outcome window without re-reading the chain. Null when the boundary
+     * blocks' timestamps could not be read — an unknown bound is treated as
+     * overlapping, the conservative direction.
+     */
+    fromTime: timestamp('from_time', { withTimezone: true }),
+    toTime: timestamp('to_time', { withTimezone: true }),
+    reason: text('reason').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    sourceTimeIdx: index('ingestion_gaps_source_time_idx').on(t.source, t.occurredAt),
+  }),
+);
+
 export const tokenSnapshots = pgTable(
   'token_snapshots',
   {

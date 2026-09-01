@@ -189,6 +189,51 @@ export async function advanceCursor(
  * and we have not yet read the block we are rewinding to. The next drain
  * re-reads the range and re-establishes it.
  */
+/**
+ * Skip the cursor FORWARD over blocks the provider can no longer serve.
+ *
+ * The second deliberate exception to `advanceCursor`'s forward-only rule, and
+ * the opposite of `rewindCursor`: that one disowns blocks we read, this one
+ * gives up on blocks we never will. A non-archive provider prunes state — the
+ * measured window on Chainstack's plan is ~128 blocks, about 4.3 minutes on
+ * Base — so a cursor left behind by a longer outage can only ever fail, and
+ * retrying it forever is what a `TransientProviderError` would have done.
+ *
+ * **No time watermark is written.** The caller has read nothing, so claiming
+ * coverage up to the new position would be a lie of exactly the kind §21's gate
+ * exists to prevent. The watermark stays where it was and advances only when a
+ * real drain commits rows; the skipped range is recorded separately in
+ * `ingestion_gaps` so consumers can see the hole rather than infer none.
+ *
+ * The hash is cleared for the same reason it is on a rewind: it described a
+ * block the cursor is no longer on.
+ */
+export async function reseedCursor(
+  db: Database,
+  source: string,
+  block: bigint,
+): Promise<void> {
+  await db
+    .insert(discoveryCursors)
+    .values({
+      source,
+      lastProcessedBlock: block,
+      lastProcessedBlockTime: null,
+      lastProcessedBlockHash: null,
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: discoveryCursors.source,
+      set: {
+        lastProcessedBlock: block,
+        // Left untouched, not advanced: see above.
+        lastProcessedBlockTime: sql`${discoveryCursors.lastProcessedBlockTime}`,
+        lastProcessedBlockHash: null,
+        updatedAt: new Date(),
+      },
+    });
+}
+
 export async function rewindCursor(
   db: Database,
   source: string,
