@@ -40,9 +40,42 @@ export function liquidityGrowth(
  * the result is null rather than a flattering 1.0.
  */
 export function liquidityStability(samples: readonly LiquiditySample[]): FeatureValue {
-  const usable = samples.map((s) => s.usd).filter((v): v is number => v !== null && v > 0);
-  if (usable.length < 3) return null;
+  const values = samples.map((s) => s.usd);
+  const measured = values.filter((v): v is number => v !== null && v > 0);
+  if (measured.length < 3) return null;
 
+  // A liquidity collapse ends the series, and the samples that record it are
+  // exactly the ones that go null — so filtering nulls out left only the calm
+  // period before the rug and reported that as stability. That was the defect.
+  // Measured on PEPKING: $14,000 -> $14,154 -> $14,154 -> $14,154, then the quote
+  // reserve fell from 2.89e18 to 3.2e7 wei and every later sample went null. The
+  // three survivors averaged a 0.4% step for a stability of 0.996 which, with
+  // every other liquidity feature null, renormalised the liquidity component to
+  // ~99/100 on a pool that had ceased to be a market. Three of the system's
+  // fifteen alerts came from exactly this.
+  //
+  // But only a null run that PERSISTS TO THE END is a collapse, which is why
+  // this tests the last sample rather than any sample. An interior null that
+  // later recovers is a failure to PRICE, not a rug: 9 pools go
+  // non-null -> null -> non-null, and one settles the semantics on its own — a
+  // PEPKING pool read 0.000296708620990369, then null, then
+  // 0.000296708627211304, with quote_reserve byte-identical at 61,593,422,200
+  // across all three. Nothing moved; only the quote-price lookup failed.
+  //
+  // Leading nulls fall out for free: a pool not yet funded (Ray — five null
+  // samples at zero reserves, then $2.54) ends measured, so it is warming up
+  // rather than collapsing.
+  //
+  // A genuine drain that recovers inside the window is still caught, by the
+  // arithmetic rather than by this flag: [14000, 14100, null, null, 5] ends
+  // measured, but the 14,100 -> 5 step is a 99.96% move and drives
+  // meanAbsChange — and so stability — to ~0 below.
+  // `?? null` only satisfies the type checker: the >= 3 measured guard above
+  // already means `values` is non-empty.
+  const lastValue = values.at(-1) ?? null;
+  if (lastValue === null || lastValue <= 0) return 0;
+
+  const usable = measured;
   const steps: number[] = [];
   for (let i = 1; i < usable.length; i += 1) {
     const previous = usable[i - 1]!;

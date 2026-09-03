@@ -30,6 +30,7 @@ import {
   latestSnapshot,
   liquiditySeries,
   loadHolderBalances,
+  poolAddressesForToken,
   smartWalletEntries,
   windowVolumeUsd,
 } from './windows.js';
@@ -160,7 +161,17 @@ export async function calculateFeatures(
   // ---- §15.3 holders -------------------------------------------------------
   const balances = await loadHolderBalances(ctx.db, pool.tokenId);
   const totalSupply = pool.totalSupplyRaw ? BigInt(pool.totalSupplyRaw) : null;
-  const holdersNow = holderCount(balances, ctx.config.holders);
+  // The pool is the counterparty to every trade, never a holder (§15.3). The
+  // configured list is unioned with the derived one so an operator can still add
+  // burn sinks and bridges that no query can infer.
+  const holderOptions: HolderOptions = {
+    ...ctx.config.holders,
+    excludedAddresses: new Set([
+      ...ctx.config.holders.excludedAddresses,
+      ...(await poolAddressesForToken(ctx.db, pool.tokenId)),
+    ]),
+  };
+  const holdersNow = holderCount(balances, holderOptions);
 
   const previous = await previousFeatureSet(ctx.db, poolId);
   const elapsedMinutes = previous
@@ -221,10 +232,10 @@ export async function calculateFeatures(
       (previous?.values['holder_count'] as number | null) ?? null,
       elapsedMinutes,
     ),
-    top10_concentration: top10Concentration(balances, totalSupply, ctx.config.holders),
+    top10_concentration: top10Concentration(balances, totalSupply, holderOptions),
     holder_retention: holderRetention(balances, {
       cohortBefore: new Date(calculatedAt.getTime() - FIVE_MINUTES),
-      options: ctx.config.holders,
+      options: holderOptions,
     }),
 
     // §15.4

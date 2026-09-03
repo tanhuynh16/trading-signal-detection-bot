@@ -1,5 +1,5 @@
 import { and, asc, eq, inArray, min, sql } from 'drizzle-orm';
-import { holderBalances, tokenSnapshots, trades, type Database } from '@sdb/database';
+import { holderBalances, pools, tokenSnapshots, trades, type Database } from '@sdb/database';
 import { fromRaw, mul, toNumber } from '@sdb/shared';
 import type { TradeWindow } from './momentum.js';
 import type { HolderBalance } from './holders.js';
@@ -169,6 +169,45 @@ export async function latestSnapshot(
 }
 
 /** Current holder balances for a token. Balances stay bigint (G4). */
+/**
+ * Pool contracts holding this token, which are never "holders" for §15.3.
+ *
+ * An AMM pool is the counterparty to every trade, so it is the largest holder of
+ * essentially every new token — measured: **108 of 156 tokens (69.2%) had a pool
+ * contract as their top holder**. Counting it pushes `top10_concentration`
+ * toward 1.0 for all of them and drags the holder component down uniformly,
+ * hiding real distribution differences between tokens.
+ *
+ * `holders.excludedAddresses` exists for exactly this and was documented for it,
+ * but ships empty and a static list cannot keep up: new pools appear
+ * continuously, so any curated list is stale the moment it is written. Deriving
+ * the set from `pools` at calculation time is self-maintaining. The DERIVATION
+ * is what is versioned by the strategy, not the resulting address list.
+ *
+ * **Known trade-off — historical reproducibility.** Because the set is derived
+ * when the feature is calculated, recomputing an old feature set later can use a
+ * DIFFERENT exclusion set than the original run did: more pools for that token
+ * may exist by then, so a wallet counted as a holder in the stored row would be
+ * excluded on recomputation. Stored rows are never rewritten, so nothing already
+ * recorded changes — but a recomputation is not guaranteed to reproduce one.
+ *
+ * That is accepted deliberately here: the alternative, a static list, is wrong
+ * continuously rather than only on replay, and 69.2% of tokens are affected
+ * today. Making replay exact needs the pool set pinned as of the feature's
+ * block, which changes what the feature MEANS and therefore belongs to a new
+ * `feature_version` — not to this audit.
+ */
+export async function poolAddressesForToken(
+  db: Database,
+  tokenId: string,
+): Promise<string[]> {
+  const rows = await db
+    .select({ address: pools.address })
+    .from(pools)
+    .where(eq(pools.tokenId, tokenId));
+  return rows.map((row) => row.address.toLowerCase());
+}
+
 export async function loadHolderBalances(
   db: Database,
   tokenId: string,

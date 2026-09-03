@@ -3,7 +3,12 @@ import { sql } from 'drizzle-orm';
 import { createDatabase, featureSets, pools, tokens, trades } from '@sdb/database';
 import { parseScaled } from '@sdb/shared';
 import { persistFeatures, type CalculatedFeatures } from './calculate.js';
-import { smartWalletEntries, tradeWindow, windowVolumeUsd } from './windows.js';
+import {
+  poolAddressesForToken,
+  smartWalletEntries,
+  tradeWindow,
+  windowVolumeUsd,
+} from './windows.js';
 
 /** Requires: docker compose up -d postgres */
 const url = process.env.TEST_DATABASE_URL ?? 'postgres://sdb:sdb@localhost:5432/sdb';
@@ -237,5 +242,42 @@ describe('smart-wallet entries (review-gate fix 2)', () => {
       baseIsToken0: true,
     });
     expect(entries).toEqual([]);
+  });
+});
+
+
+describe('pool contracts are never holders (§15.3)', () => {
+  it('returns every pool address for the token, lowercased', async () => {
+    // The AMM pool is the counterparty to every trade, so it is the largest
+    // holder of essentially every new token — measured at 108 of 156 tokens
+    // (69.2%). Counting it pushes top10_concentration toward 1.0 for all of
+    // them and flattens the very differences the holder component exists to see.
+    const { tokenId } = await seedPool();
+    await db.insert(pools).values({
+      tokenId,
+      chainId: CHAIN,
+      dex: 'uniswap-v3',
+      address: w(2002),
+      quoteTokenAddress: WETH,
+      discoveredAt: at(0),
+      blockNumber: 2n,
+      transactionHash: `0x${'2'.repeat(64)}`,
+    });
+
+    const addresses = await poolAddressesForToken(db, tokenId);
+
+    // Both pools, not just the one the features are being calculated for: a
+    // token's supply sitting in a sibling venue is no more a holder than in this
+    // one.
+    expect(addresses.sort()).toEqual([w(2001), w(2002)].sort());
+    for (const a of addresses) expect(a).toBe(a.toLowerCase());
+  });
+
+  it('returns an empty list for a token with no pools rather than throwing', async () => {
+    const [token] = await db
+      .insert(tokens)
+      .values({ chainId: CHAIN, address: w(1099), firstSeenAt: at(0) })
+      .returning({ id: tokens.id });
+    expect(await poolAddressesForToken(db, token!.id)).toEqual([]);
   });
 });

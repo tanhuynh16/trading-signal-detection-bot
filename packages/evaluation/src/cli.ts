@@ -9,6 +9,7 @@ import {
   renderExclusions,
   renderFeatures,
   renderFooter,
+  renderCoverageWarning,
   renderHeader,
 } from './report.js';
 
@@ -82,6 +83,14 @@ try {
         generatedAt: new Date(),
       }),
     );
+
+    // §22: say plainly when part of the sample was scored over a window the
+    // tails never read, so nobody calibrates on it by accident.
+    const uningested = samples.filter(
+      (sample) => sample.failureReason === 'incomplete_tail_coverage',
+    ).length;
+    const warning = renderCoverageWarning({ uningested, total: samples.length });
+    if (warning) console.log(warning);
 
     console.log('\n── Outcomes by score band ' + '─'.repeat(50));
     console.log(renderBands(cells));

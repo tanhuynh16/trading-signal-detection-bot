@@ -134,4 +134,36 @@ describe('holderRetention (spec §15.3)', () => {
     const balances = [h(w(1), 5000n, 0), h(w(2), 5n, 0)];
     expect(holderRetention(balances, { cohortBefore: at(5), options: opts() })).toBe(0.5);
   });
+
+  it('keeps an excluded pool address out of BOTH sides of the ratio', () => {
+    // The pool is the counterparty to every trade, so it acquires early and
+    // holds a large balance — it would land in the cohort AND be counted as
+    // retained, dragging the ratio toward 1 for every token. Measured: 108 of
+    // 156 tokens (69.2%) had a pool contract as their largest holder.
+    //
+    // Retention is the one holder feature that does not route through
+    // `eligible()`; it filters the cohort itself, so it needs its own proof.
+    const balances = [h(w(1), 5000n, 0), h(w(2), 0n, 0), h(LP, 10n ** 30n, 0)];
+
+    const withPool = holderRetention(balances, { cohortBefore: at(5), options: opts() });
+    const withoutPool = holderRetention(balances, {
+      cohortBefore: at(5),
+      options: opts({ excludedAddresses: new Set([LP]) }),
+    });
+
+    // Included: 2 of 3 retained. Excluded: the two real wallets alone, 1 of 2.
+    expect(withPool).toBeCloseTo(2 / 3, 10);
+    expect(withoutPool).toBe(0.5);
+  });
+
+  it('returns null when the cohort is nothing but excluded addresses', () => {
+    // Not 0 and not 1: a retention rate over no real holders is undefined.
+    const balances = [h(LP, 10n ** 30n, 0)];
+    expect(
+      holderRetention(balances, {
+        cohortBefore: at(5),
+        options: opts({ excludedAddresses: new Set([LP]) }),
+      }),
+    ).toBeNull();
+  });
 });
