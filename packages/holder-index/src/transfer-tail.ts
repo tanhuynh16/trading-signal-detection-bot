@@ -2,7 +2,7 @@ import { and, eq, gte, sql } from 'drizzle-orm';
 import { decodeEventLog, parseAbiItem, toEventSelector, type Hex, type Log, type PublicClient } from 'viem';
 import { AdaptiveChunkSize, fetchLogsChunked } from '@sdb/blockchain';
 import { advanceCursor, planRange, readCursor } from '@sdb/discovery';
-import { holderBalances, pools, tokens, type Database } from '@sdb/database';
+import { appliedTransfers, holderBalances, pools, tokens, type Database } from '@sdb/database';
 import {
   canonicalize,
   DEAD_ADDRESS,
@@ -73,10 +73,19 @@ export type DecodedTransfer = {
   to: Address;
   value: bigint;
   blockNumber: bigint;
+  /**
+   * Log identity, carried so `applyTransfers` can be idempotent. A balance is a
+   * running sum: without this, re-reading a block range re-applies every delta.
+   */
+  txHash: string;
+  logIndex: number;
 };
 
 export function decodeTransfer(log: Log): DecodedTransfer | null {
   if (log.topics[0] !== TRANSFER_TOPIC || log.blockNumber === null) return null;
+  // A pending log has no identity, so it cannot be recorded as applied — and an
+  // unrecordable transfer would be re-applied on the next pass.
+  if (log.transactionHash === null || log.logIndex === null) return null;
   try {
     const { args } = decodeEventLog({
       abi: [TRANSFER_EVENT],
@@ -89,6 +98,8 @@ export function decodeTransfer(log: Log): DecodedTransfer | null {
       to: canonicalize(args.to),
       value: args.value,
       blockNumber: log.blockNumber,
+      txHash: log.transactionHash,
+      logIndex: log.logIndex,
     };
   } catch {
     // A non-standard Transfer (e.g. ERC-721's indexed tokenId) will not decode
@@ -120,6 +131,32 @@ export async function applyTransfers(
   transfers: readonly DecodedTransfer[],
   occurredAt: Map<string, Date>,
 ): Promise<number> {
+  if (transfers.length === 0) return 0;
+
+  // Claim each Transfer BEFORE its delta is applied. A balance is a running sum,
+  // so applying one twice is permanent corruption, not a duplicate row — and the
+  // startup replay overlap re-reads blocks by design. Only the transfers this
+  // call actually inserted are ours to apply; the rest were already counted.
+  const claimed = new Set<string>();
+  const identity = (t: DecodedTransfer) => `${t.txHash}:${t.logIndex}`;
+  const unique = new Map<string, DecodedTransfer>();
+  for (const t of transfers) unique.set(identity(t), t);
+
+  const inserted = await db
+    .insert(appliedTransfers)
+    .values(
+      [...unique.values()].map((t) => ({
+        txHash: t.txHash,
+        logIndex: t.logIndex,
+        blockNumber: t.blockNumber,
+      })),
+    )
+    .onConflictDoNothing({ target: [appliedTransfers.txHash, appliedTransfers.logIndex] })
+    .returning({ txHash: appliedTransfers.txHash, logIndex: appliedTransfers.logIndex });
+
+  for (const row of inserted) claimed.add(`${row.txHash}:${row.logIndex}`);
+  if (claimed.size === 0) return 0;
+
   type Delta = { tokenId: string; wallet: string; delta: bigint; block: bigint; at: Date };
   const deltas = new Map<string, Delta>();
 
@@ -135,7 +172,8 @@ export async function applyTransfers(
     }
   };
 
-  for (const transfer of transfers) {
+  for (const transfer of unique.values()) {
+    if (!claimed.has(identity(transfer))) continue; // already applied on an earlier pass
     const tokenId = tokenIdByAddress.get(transfer.token);
     if (!tokenId) continue;
     const at = occurredAt.get(transfer.blockNumber.toString());
@@ -152,15 +190,7 @@ export async function applyTransfers(
     // matching transfer IN happened before this tail's cursor — the wallet was
     // funded before we started reading. That is missing history, not a debt.
     //
-    // Measured before this clamp existed: 739 rows across 123 tokens were
-    // negative, the worst at -1.5e28. The feature layer never surfaced them
-    // because `eligible()` filters `balance > dustThreshold`, so a negative row
-    // is silently dropped — which also silently drops a wallet whose balance is
-    // merely UNDERSTATED (funded 100 pre-cursor, +50 then -120 after, recorded
-    // as -70 when the truth is 30), removing a real holder from
-    // top10_concentration rather than a phantom one.
-    //
-    // So: clamp at zero, and record that the row is a lower bound rather than a
+    // Clamp at zero and record that the row is a lower bound rather than a
     // measurement. `partially_observed` is the null §15 would have used if the
     // column had a null to spare.
     const clamped = sql`greatest(0, ${holderBalances.balanceRaw} + ${delta}::numeric)`;
@@ -181,8 +211,6 @@ export async function applyTransfers(
       .onConflictDoUpdate({
         target: [holderBalances.tokenId, holderBalances.wallet],
         set: {
-          // Delta applied in SQL: two drains touching the same wallet in the
-          // same window must sum, not overwrite.
           balanceRaw: clamped,
           // Sticky: once a wallet's inbound history is known to be incomplete,
           // no later transfer makes it complete again.
