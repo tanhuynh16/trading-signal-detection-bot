@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigurationError } from '@sdb/shared';
-import { BASE_MEME_V1, getStrategyConfig, parseStrategyConfig } from './strategy.js';
+import {
+  BASE_MEME_V1,
+  BASE_MEME_V2,
+  SMART_MONEY_SEED_WALLETS_V2,
+  getStrategyConfig,
+  parseStrategyConfig,
+} from './strategy.js';
 
 const valid = structuredClone(BASE_MEME_V1) as unknown as Record<string, unknown>;
 
@@ -48,5 +54,49 @@ describe('strategy config', () => {
 
   it('refuses an unknown strategy version rather than falling back', () => {
     expect(() => getStrategyConfig('does-not-exist')).toThrow(ConfigurationError);
+  });
+});
+
+describe('base-meme-v2 smart-money seeding (§15.5, §22)', () => {
+  it('leaves base-meme-v1 unseeded', () => {
+    // §22 in test form. v1 labels 1,242 recorded signals whose smartMoney
+    // component is null and whose coverage is 0.50 or 0.70. Seeding wallets
+    // into it would leave past and future rows sharing one strategy_version
+    // while meaning different things, which is exactly what
+    // registerStrategyConfig refuses at runtime.
+    expect(BASE_MEME_V1.smartMoney.seedWallets).toEqual([]);
+  });
+
+  it('registers both versions so historical rows still resolve', () => {
+    expect(getStrategyConfig('base-meme-v1').smartMoney.seedWallets).toEqual([]);
+    expect(getStrategyConfig('base-meme-v2').smartMoney.seedWallets).toHaveLength(58);
+  });
+
+  it('carries a clean seed list', () => {
+    expect(SMART_MONEY_SEED_WALLETS_V2).toHaveLength(58);
+    for (const wallet of SMART_MONEY_SEED_WALLETS_V2) {
+      expect(wallet).toMatch(/^0x[0-9a-f]{40}$/);
+    }
+    // A duplicate would silently double-count one actor as two in
+    // independentSmartWalletCount, which is the number §15.5 clusters to avoid.
+    expect(new Set(SMART_MONEY_SEED_WALLETS_V2).size).toBe(
+      SMART_MONEY_SEED_WALLETS_V2.length,
+    );
+  });
+
+  it('differs from v1 only in version and seed list', () => {
+    const { strategyVersion: _v1, smartMoney: _s1, ...restV1 } = BASE_MEME_V1;
+    const { strategyVersion: _v2, smartMoney: _s2, ...restV2 } = BASE_MEME_V2;
+    expect(restV2).toEqual(restV1);
+    expect(BASE_MEME_V2.smartMoney.minIndependentWallets).toBe(
+      BASE_MEME_V1.smartMoney.minIndependentWallets,
+    );
+  });
+
+  it('is not the default — switching to it is an explicit .env change', () => {
+    // Seeding lowers every score whose pools no seed wallet touched, so v2 must
+    // not become active merely by existing. See the constant's own comment for
+    // the replayed numbers.
+    expect(BASE_MEME_V1.strategyVersion).toBe('base-meme-v1');
   });
 });

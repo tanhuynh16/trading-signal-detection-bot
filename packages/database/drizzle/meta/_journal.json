@@ -71,6 +71,13 @@
       "when": 1788256589396,
       "tag": "0009_worried_firebrand",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788256589397,
+      "tag": "0010_holder_partial_observation",
+      "breakpoints": true
     }
   ]
 }

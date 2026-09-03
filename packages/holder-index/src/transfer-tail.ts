@@ -147,12 +147,34 @@ export async function applyTransfers(
   if (deltas.size === 0) return 0;
 
   for (const d of deltas.values()) {
+    const delta = d.delta.toString();
+    // A balance can only go negative when we applied a transfer OUT whose
+    // matching transfer IN happened before this tail's cursor — the wallet was
+    // funded before we started reading. That is missing history, not a debt.
+    //
+    // Measured before this clamp existed: 739 rows across 123 tokens were
+    // negative, the worst at -1.5e28. The feature layer never surfaced them
+    // because `eligible()` filters `balance > dustThreshold`, so a negative row
+    // is silently dropped — which also silently drops a wallet whose balance is
+    // merely UNDERSTATED (funded 100 pre-cursor, +50 then -120 after, recorded
+    // as -70 when the truth is 30), removing a real holder from
+    // top10_concentration rather than a phantom one.
+    //
+    // So: clamp at zero, and record that the row is a lower bound rather than a
+    // measurement. `partially_observed` is the null §15 would have used if the
+    // column had a null to spare.
+    const clamped = sql`greatest(0, ${holderBalances.balanceRaw} + ${delta}::numeric)`;
+    const wouldGoNegative = sql`(${holderBalances.balanceRaw} + ${delta}::numeric) < 0`;
+
     await db
       .insert(holderBalances)
       .values({
         tokenId: d.tokenId,
         wallet: d.wallet,
-        balanceRaw: d.delta.toString(),
+        // A first sighting that is already an outflow is the same missing-inbound
+        // case, just with no row to update yet.
+        balanceRaw: (d.delta < 0n ? 0n : d.delta).toString(),
+        partiallyObserved: d.delta < 0n,
         firstAcquiredAt: d.at,
         lastUpdatedBlock: d.block,
       })
@@ -161,7 +183,10 @@ export async function applyTransfers(
         set: {
           // Delta applied in SQL: two drains touching the same wallet in the
           // same window must sum, not overwrite.
-          balanceRaw: sql`${holderBalances.balanceRaw} + ${d.delta.toString()}::numeric`,
+          balanceRaw: clamped,
+          // Sticky: once a wallet's inbound history is known to be incomplete,
+          // no later transfer makes it complete again.
+          partiallyObserved: sql`${holderBalances.partiallyObserved} OR ${wouldGoNegative}`,
           lastUpdatedBlock: sql`greatest(${holderBalances.lastUpdatedBlock}, ${d.block})`,
         },
       });

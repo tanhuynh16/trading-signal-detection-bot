@@ -163,3 +163,77 @@ describe('hasSufficientCoverage', () => {
     expect(hasSufficientCoverage(score, config)).toBe(false);
   });
 });
+
+describe('the cost of seeding smart money (§15.5 + plan G1)', () => {
+  /**
+   * Seeding a wallet list does not just add information — it converts the
+   * smartMoney component from "unmeasured" to "measured 0" for every pool none
+   * of the seeded wallets bought. `independentSmartWalletCount` returns null
+   * only when the seed list is EMPTY, so with seeds present and no entries it
+   * reports a real 0, which normalises to 0 rather than dropping out.
+   *
+   * The consequence is a fixed multiplier on every such score:
+   *
+   *     score_after = score_before * coverage_before / (coverage_before + 0.30)
+   *
+   * Asserted here so the trade-off is discoverable in code. Replayed against
+   * 1,242 signals recorded under base-meme-v1 it moved the best score from
+   * 74.345 to 46.466 and took the count clearing interestingThreshold from 5
+   * to 0 — which is why base-meme-v2 exists but is not the default.
+   */
+  const promising: FeatureSet = {
+    ...allNull,
+    liquidity_usd: 500_000,
+    liquidity_stability: 0.9,
+    buy_sell_ratio: 3,
+    trade_velocity: 30,
+    holder_count: 800,
+    holder_growth_rate: 12,
+    holder_retention: 0.8,
+    top10_concentration: 0.2,
+  };
+
+  it('applies cov/(cov+0.30) when an untouched pool starts reporting a zero', () => {
+    const unseeded = calculateAlphaScore(promising, config);
+    const seededNoEntries = calculateAlphaScore(
+      { ...promising, independent_smart_wallet_count: 0 },
+      config,
+    );
+
+    expect(unseeded.components.find((c) => c.name === 'smartMoney')!.raw).toBeNull();
+    expect(seededNoEntries.components.find((c) => c.name === 'smartMoney')!.raw).toBe(0);
+
+    expect(unseeded.coverage).toBeCloseTo(0.7, 5);
+    expect(seededNoEntries.coverage).toBeCloseTo(1.0, 5);
+
+    const expected = unseeded.score * (0.7 / (0.7 + 0.3));
+    expect(seededNoEntries.score).toBeCloseTo(expected, 6);
+    expect(seededNoEntries.score).toBeLessThan(unseeded.score);
+  });
+
+  it('does not let one seeded entrant recover the original score', () => {
+    // A single wallet entering 5 minutes ago scores the component ~40, well
+    // under the ~74 it is being averaged against. It takes roughly 4+
+    // independent entrants before a touched pool beats its unseeded score.
+    const oneEntrant = calculateAlphaScore(
+      {
+        ...promising,
+        independent_smart_wallet_count: 1,
+        smart_wallet_entry_recency: 5,
+      },
+      config,
+    );
+    const unseeded = calculateAlphaScore(promising, config);
+    expect(oneEntrant.score).toBeLessThan(unseeded.score);
+  });
+
+  it('raises evidence coverage, which is the one unambiguous gain', () => {
+    // 163 of the 1,242 recorded signals sat at coverage 0.50 and were capped at
+    // INTERESTING by minCoverage. A measured smartMoney lifts them to 0.80.
+    const thin: FeatureSet = { ...allNull, buy_sell_ratio: 3, holder_count: 800 };
+    const before = calculateAlphaScore(thin, config);
+    const after = calculateAlphaScore({ ...thin, independent_smart_wallet_count: 0 }, config);
+    expect(hasSufficientCoverage(before, config)).toBe(false);
+    expect(hasSufficientCoverage(after, config)).toBe(true);
+  });
+});

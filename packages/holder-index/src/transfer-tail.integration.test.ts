@@ -128,3 +128,86 @@ describe('transfer application (spec §15.3 via ADR 0005)', () => {
     expect((await balances()).get(w(1))).toBe(200n);
   });
 });
+
+describe('balances funded before the cursor (partial observation)', () => {
+  it('clamps at zero instead of storing a negative balance', async () => {
+    // The wallet was funded before this tail started reading, so we only ever
+    // see it spend. Measured before the clamp: 739 such rows across 123 tokens,
+    // worst at -1.5e28.
+    const tokenId = await seed();
+    const spender = w(0x51);
+
+    await apply(tokenId, [transfer(spender, w(0x52), 500n)]);
+
+    const [row] = await db
+      .select({
+        balanceRaw: holderBalances.balanceRaw,
+        partiallyObserved: holderBalances.partiallyObserved,
+      })
+      .from(holderBalances)
+      .where(sql`${holderBalances.wallet} = ${spender}`);
+
+    expect(BigInt(row!.balanceRaw)).toBe(0n);
+    expect(row!.partiallyObserved).toBe(true);
+  });
+
+  it('clamps an existing balance driven negative by a later outflow', async () => {
+    const tokenId = await seed();
+    const wallet = w(0x53);
+
+    await apply(tokenId, [transfer(ZERO_ADDRESS, wallet, 100n, 1n)]);
+    await apply(tokenId, [transfer(wallet, w(0x54), 400n, 2n)]);
+
+    const [row] = await db
+      .select({
+        balanceRaw: holderBalances.balanceRaw,
+        partiallyObserved: holderBalances.partiallyObserved,
+      })
+      .from(holderBalances)
+      .where(sql`${holderBalances.wallet} = ${wallet}`);
+
+    expect(BigInt(row!.balanceRaw)).toBe(0n);
+    expect(row!.partiallyObserved).toBe(true);
+  });
+
+  it('leaves a fully observed wallet unflagged', async () => {
+    const tokenId = await seed();
+    const wallet = w(0x55);
+
+    await apply(tokenId, [transfer(ZERO_ADDRESS, wallet, 900n, 1n)]);
+    await apply(tokenId, [transfer(wallet, w(0x56), 400n, 2n)]);
+
+    const [row] = await db
+      .select({
+        balanceRaw: holderBalances.balanceRaw,
+        partiallyObserved: holderBalances.partiallyObserved,
+      })
+      .from(holderBalances)
+      .where(sql`${holderBalances.wallet} = ${wallet}`);
+
+    expect(BigInt(row!.balanceRaw)).toBe(500n);
+    expect(row!.partiallyObserved).toBe(false);
+  });
+
+  it('keeps the flag once set, even after a later inbound transfer', async () => {
+    // Sticky on purpose: a wallet whose inbound history we missed does not
+    // become fully observed because we later saw one transfer in. Its balance
+    // stays a lower bound.
+    const tokenId = await seed();
+    const wallet = w(0x57);
+
+    await apply(tokenId, [transfer(wallet, w(0x58), 300n, 1n)]);
+    await apply(tokenId, [transfer(ZERO_ADDRESS, wallet, 700n, 2n)]);
+
+    const [row] = await db
+      .select({
+        balanceRaw: holderBalances.balanceRaw,
+        partiallyObserved: holderBalances.partiallyObserved,
+      })
+      .from(holderBalances)
+      .where(sql`${holderBalances.wallet} = ${wallet}`);
+
+    expect(BigInt(row!.balanceRaw)).toBe(700n);
+    expect(row!.partiallyObserved).toBe(true);
+  });
+});
