@@ -3,6 +3,7 @@ import { eq, inArray, sql } from 'drizzle-orm';
 import {
   createDatabase,
   discoveryCursors,
+  ingestionGaps,
   pools,
   reorgEvents,
   tokens,
@@ -10,7 +11,8 @@ import {
 } from '@sdb/database';
 import type { PublicClient } from 'viem';
 import { advanceCursor, readCursorState } from '@sdb/discovery';
-import { confirmedHead, detectReorg } from './swap-tail.js';
+import { ProviderHistoryUnavailableError } from '@sdb/shared';
+import { confirmedHead, detectReorg, SwapTail, SWAP_TAIL_SOURCE } from './swap-tail.js';
 
 /**
  * Requires the compose stack: docker compose up -d postgres
@@ -87,7 +89,13 @@ const clean = async () => {
   await db.delete(reorgEvents).where(eq(reorgEvents.source, SOURCE));
   // Only the cursor row this file owns: `discovery_cursors` is shared with the
   // live swap tail and the §21 outcome suite.
-  await db.delete(discoveryCursors).where(inArray(discoveryCursors.source, [SOURCE]));
+  // SWAP_TAIL_SOURCE is included because the drain test below exercises a real
+  // SwapTail, which hardcodes it. `fileParallelism: false` makes that safe, but
+  // the rows still must not leak into the next file.
+  await db
+    .delete(discoveryCursors)
+    .where(inArray(discoveryCursors.source, [SOURCE, SWAP_TAIL_SOURCE]));
+  await db.delete(ingestionGaps).where(eq(ingestionGaps.source, SWAP_TAIL_SOURCE));
 };
 
 beforeEach(clean);
@@ -272,5 +280,105 @@ describe('confirmedHead', () => {
 
   it('clamps at genesis', () => {
     expect(confirmedHead(3n, 10)).toBe(0n);
+  });
+});
+
+
+/**
+ * A chain that has pruned everything below `prunedBelow`, answering exactly as
+ * Chainstack does. This is the shape that wedged the live tail: the block under
+ * the cursor was 86,779 behind head and could not be read at all.
+ */
+function prunedChain(prunedBelow: bigint, fork = 'a') {
+  const client = {
+    getBlock: async ({ blockNumber }: { blockNumber: bigint }) => {
+      if (blockNumber < prunedBelow) {
+        throw new Error(
+          'Requested resource not available. Details: Archive, Debug and Trace ' +
+            'requests are not available on your current plan.',
+        );
+      }
+      return {
+        hash: `0x${blockNumber.toString()}-${fork}`,
+        timestamp: BigInt(1_760_000_000) + blockNumber * 2n,
+      };
+    },
+    getLogs: async () => [],
+  } as unknown as PublicClient;
+  return client;
+}
+
+const silentLogger = (() => {
+  const self: Record<string, unknown> = {};
+  for (const level of ['trace', 'debug', 'info', 'warn', 'error', 'fatal']) {
+    self[level] = () => undefined;
+  }
+  self['child'] = () => self;
+  return self as never;
+})();
+
+describe('a cursor older than the provider history window', () => {
+  it('surfaces a TYPED error from detectReorg, not a raw provider error', async () => {
+    // drain()'s recovery keys on the error TYPE, so an unclassified provider
+    // string is what made the tail retry forever instead of skipping forward.
+    await advanceCursor(db, SOURCE, 1_000n, new Date(), '0x1000-a');
+
+    await expect(
+      detectReorg(db, prunedChain(900_000n), SOURCE, config),
+    ).rejects.toBeInstanceOf(ProviderHistoryUnavailableError);
+  });
+
+  it('self-heals: records the gap and reseeds forward instead of wedging', async () => {
+    // The live regression. The swap tail sat at 50,734,485 with a stored hash
+    // while head was 86,779 blocks ahead; detectReorg read that block first,
+    // the raw error escaped the history handling, and the tail never recovered.
+    const stale = 50_734_485n;
+    const head = 50_821_264n;
+    await advanceCursor(db, SWAP_TAIL_SOURCE, stale, new Date(), '0x28323bb6');
+
+    const tail = new SwapTail({
+      db,
+      http: prunedChain(head - 128n),
+      logger: silentLogger,
+      config: {
+        chainId: CHAIN,
+        logChunkBlocks: 100,
+        maxTokenAgeMinutes: 360,
+        maxAddressesPerQuery: 100,
+        outcomeRetentionHours: 26,
+        confirmations: 5,
+        reorgDepth: 32,
+      },
+    });
+
+    await expect(tail.drain(head, false)).resolves.toEqual({ swaps: 0 });
+
+    const gaps = await db
+      .select({ fromBlock: ingestionGaps.fromBlock, toBlock: ingestionGaps.toBlock })
+      .from(ingestionGaps)
+      .where(eq(ingestionGaps.source, SWAP_TAIL_SOURCE));
+    expect(gaps).toHaveLength(1);
+    // The gap starts at the cursor's OWN block: we could not read even the
+    // block we claimed to have processed.
+    expect(gaps[0]!.fromBlock).toBe(stale);
+    expect(gaps[0]!.toBlock).toBe(confirmedHead(head, 5));
+
+    const after = await readCursorState(db, SWAP_TAIL_SOURCE);
+    expect(after!.lastProcessedBlock).toBe(confirmedHead(head, 5));
+    // The hash is cleared: it described a block we are no longer on and could
+    // not verify.
+    expect(after!.lastProcessedBlockHash).toBeNull();
+  });
+
+  it('still detects a real reorg on a block the provider can serve', async () => {
+    // The guard must not have turned every mismatch into a skip.
+    const poolId = await seedPool();
+    await seedTrade(poolId, 1_000n);
+    await advanceCursor(db, SOURCE, 1_000n, new Date(), '0xdifferent');
+
+    const rollback = await detectReorg(db, prunedChain(1n), SOURCE, config);
+
+    expect(rollback).not.toBeNull();
+    expect(rollback!.actualHash).toBe('0x1000-a');
   });
 });
