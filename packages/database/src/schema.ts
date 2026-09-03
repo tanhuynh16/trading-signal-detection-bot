@@ -296,6 +296,17 @@ export const holderBalances = pgTable(
     balanceRaw: raw('balance_raw').notNull(),
     firstAcquiredAt: timestamp('first_acquired_at', { withTimezone: true }).notNull(),
     lastUpdatedBlock: bigint('last_updated_block', { mode: 'bigint' }).notNull(),
+    /**
+     * True once a transfer OUT was applied that the matching transfer IN was
+     * never seen for — the wallet was funded before this tail's cursor began.
+     *
+     * The balance is then a LOWER BOUND, not a measurement: clamped at zero
+     * because a token balance cannot be negative, but "0" here means "we cannot
+     * tell", not "holds nothing". §15's null-vs-zero rule, applied to the one
+     * case where the storage type has no null to offer. Measured: 739 rows
+     * across 123 tokens had gone negative, the worst to -1.5e28.
+     */
+    partiallyObserved: boolean('partially_observed').notNull().default(false),
   },
   (t) => ({
     pk: uniqueIndex('holder_balances_token_wallet_uq').on(t.tokenId, t.wallet),

@@ -18,6 +18,7 @@ import {
 import { SwapTail } from '@sdb/snapshot-engine';
 import { TransferTail } from '@sdb/holder-index';
 import { startProcessors } from './processors.js';
+import { TailSupervisor } from './tail-supervisor.js';
 import { bootstrap, createLogger, registerSecret } from '@sdb/shared';
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES, jobId } from './queues.js';
 
@@ -297,18 +298,14 @@ process.on('unhandledRejection', (reason) => {
 
 // The tail rides the same head notifications as discovery: one drain pass
 // keeps both the cursor and the trade log moving without extra polling.
-let tailFirstDrain = true;
+//
+// Each tail drains under its own isolated failure handling — see
+// TailSupervisor, which exists because a shared try/catch once let a failing
+// swap tail silently take the transfer tail down with it for two days.
+const tails = new TailSupervisor(logger);
 discovery.onDrained(async (head) => {
-  try {
-    await swapTail.drain(head, tailFirstDrain);
-    await transferTail.drain(head, tailFirstDrain);
-    tailFirstDrain = false;
-  } catch (error) {
-    logger.error(
-      { err: error instanceof Error ? error.message : String(error) },
-      'swap tail drain failed; discovery continues',
-    );
-  }
+  await tails.drain('swap', head, (h, first) => swapTail.drain(h, first));
+  await tails.drain('transfer', head, (h, first) => transferTail.drain(h, first));
 });
 
 /**
