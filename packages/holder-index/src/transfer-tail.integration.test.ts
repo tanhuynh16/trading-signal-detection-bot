@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { createDatabase, holderBalances, pools, tokens } from '@sdb/database';
+import { appliedTransfers, createDatabase, holderBalances, pools, tokens } from '@sdb/database';
 import { ZERO_ADDRESS } from '@sdb/shared';
 import { applyTransfers, NON_HOLDER_ADDRESSES, type DecodedTransfer } from './transfer-tail.js';
 
@@ -31,13 +31,20 @@ async function seed() {
   return token!.id;
 }
 
-const transfer = (from: string, to: string, value: bigint, block = 1n): DecodedTransfer => ({
-  token: TOKEN as `0x${string}`,
-  from: from as `0x${string}`,
-  to: to as `0x${string}`,
-  value,
-  blockNumber: block,
-});
+let logSeq = 0;
+/** Each call is a DISTINCT log, so re-applying one is a deliberate act in a test. */
+const transfer = (from: string, to: string, value: bigint, block = 1n): DecodedTransfer => {
+  logSeq += 1;
+  return {
+    token: TOKEN as `0x${string}`,
+    from: from as `0x${string}`,
+    to: to as `0x${string}`,
+    value,
+    blockNumber: block,
+    txHash: `0x${logSeq.toString(16).padStart(64, '0')}`,
+    logIndex: 0,
+  };
+};
 
 async function apply(tokenId: string, transfers: DecodedTransfer[]) {
   const times = new Map(transfers.map((t) => [t.blockNumber.toString(), at]));
@@ -52,11 +59,20 @@ async function balances() {
 }
 
 beforeEach(async () => {
-  await db.execute(sql`TRUNCATE ${holderBalances}, ${pools}, ${tokens} RESTART IDENTITY CASCADE`);
+  // applied_transfers must be truncated too: it is the whole point of the
+  // ledger that a claimed log is never re-applied, so leaving it populated makes
+  // the NEXT run of this file a replay of the previous one.
+  await db.execute(
+    sql`TRUNCATE ${holderBalances}, ${appliedTransfers}, ${pools}, ${tokens} RESTART IDENTITY CASCADE`,
+  );
 });
 
 afterAll(async () => {
-  await db.execute(sql`TRUNCATE ${holderBalances}, ${pools}, ${tokens} RESTART IDENTITY CASCADE`);
+  // Leave the database as we found it, so a following suite or a rerun starts
+  // clean rather than inheriting claimed logs.
+  await db.execute(
+    sql`TRUNCATE ${holderBalances}, ${appliedTransfers}, ${pools}, ${tokens} RESTART IDENTITY CASCADE`,
+  );
   await close();
 });
 
@@ -209,5 +225,76 @@ describe('balances funded before the cursor (partial observation)', () => {
 
     expect(BigInt(row!.balanceRaw)).toBe(700n);
     expect(row!.partiallyObserved).toBe(true);
+  });
+});
+
+describe('idempotency under replay (the top10_concentration > 1 root cause)', () => {
+  it('applies a Transfer exactly once even when the range is re-read', async () => {
+    // The startup replay overlap re-reads blocks by design. Before the
+    // applied_transfers ledger this doubled balances permanently: measured as a
+    // QUANTIZED sum(balances)/totalSupply of ~2.0 across 59 tokens, and one
+    // token's top holder verified against on-chain balanceOf at exactly 2.000.
+    const tokenId = await seed();
+    const wallet = w(0x61);
+    const t = transfer(ZERO_ADDRESS, wallet, 1_000n, 7n);
+
+    const first = await apply(tokenId, [t]);
+    const replay = await apply(tokenId, [t]); // identical log, second pass
+
+    expect(first).toBe(1);
+    expect(replay).toBe(0);
+
+    const [row] = await db
+      .select({ balanceRaw: holderBalances.balanceRaw })
+      .from(holderBalances)
+      .where(sql`${holderBalances.wallet} = ${wallet}`);
+    expect(BigInt(row!.balanceRaw)).toBe(1_000n);
+  });
+
+  it('applies only the new logs when a replayed range also carries new ones', async () => {
+    const tokenId = await seed();
+    const wallet = w(0x62);
+    const old = transfer(ZERO_ADDRESS, wallet, 500n, 8n);
+    await apply(tokenId, [old]);
+
+    const fresh = transfer(ZERO_ADDRESS, wallet, 300n, 9n);
+    await apply(tokenId, [old, fresh]); // overlap: one seen, one new
+
+    const [row] = await db
+      .select({ balanceRaw: holderBalances.balanceRaw })
+      .from(holderBalances)
+      .where(sql`${holderBalances.wallet} = ${wallet}`);
+    expect(BigInt(row!.balanceRaw)).toBe(800n);
+  });
+
+  it('treats two logs in one transaction as distinct', async () => {
+    // Identity is (tx_hash, log_index), not tx_hash. A router that emits several
+    // Transfers in one transaction must have all of them counted.
+    const tokenId = await seed();
+    const wallet = w(0x63);
+    const a = { ...transfer(ZERO_ADDRESS, wallet, 100n, 10n), logIndex: 0 };
+    const b = { ...a, logIndex: 1 };
+
+    await apply(tokenId, [a, b]);
+
+    const [row] = await db
+      .select({ balanceRaw: holderBalances.balanceRaw })
+      .from(holderBalances)
+      .where(sql`${holderBalances.wallet} = ${wallet}`);
+    expect(BigInt(row!.balanceRaw)).toBe(200n);
+  });
+
+  it('deduplicates a log repeated within a single batch', async () => {
+    const tokenId = await seed();
+    const wallet = w(0x64);
+    const t = transfer(ZERO_ADDRESS, wallet, 250n, 11n);
+
+    await apply(tokenId, [t, t]);
+
+    const [row] = await db
+      .select({ balanceRaw: holderBalances.balanceRaw })
+      .from(holderBalances)
+      .where(sql`${holderBalances.wallet} = ${wallet}`);
+    expect(BigInt(row!.balanceRaw)).toBe(250n);
   });
 });

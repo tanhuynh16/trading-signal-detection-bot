@@ -41,6 +41,16 @@ export const tokens = pgTable(
     decimals: integer('decimals'),
     totalSupplyRaw: raw('total_supply_raw'),
     firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull(),
+    /**
+     * This token's holder balances were accumulated before `applied_transfers`
+     * existed, so some Transfers may have been applied more than once.
+     *
+     * The rows are deliberately NOT rewritten — they are the audit trail of what
+     * the system actually believed at the time, and §22 keeps historical
+     * semantics intact. The flag exists so calibration can exclude them instead
+     * of silently treating corrupt balances as evidence.
+     */
+    holderHistorySuspect: boolean('holder_history_suspect').notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => ({
@@ -311,6 +321,42 @@ export const holderBalances = pgTable(
   (t) => ({
     pk: uniqueIndex('holder_balances_token_wallet_uq').on(t.tokenId, t.wallet),
     balanceIdx: index('holder_balances_token_balance_idx').on(t.tokenId, t.balanceRaw),
+  }),
+);
+
+/**
+ * Every Transfer log whose balance delta has already been applied.
+ *
+ * `holder_balances` is a running sum, so applying the same Transfer twice is
+ * permanent corruption rather than a duplicate row. `trades` never had this
+ * problem because it stores one row per log under
+ * `uniqueIndex(tx_hash, log_index)` — re-ingesting is simply a no-op. Balances
+ * had no equivalent identity, so the startup replay overlap
+ * (`DISCOVERY_BLOCK_OVERLAP`, applied on the first drain after every restart)
+ * re-applied every Transfer in the overlapped range.
+ *
+ * Measured before this table existed: 59 of 179 tokens with holders had
+ * `sum(balances) / totalSupply` at almost exactly 2.0 and 3 at 3.0 — a
+ * *quantized* distribution, which is the signature of whole re-applications
+ * rather than of any continuous accounting error. One token's top holder was
+ * verified against on-chain `balanceOf` at a ratio of exactly 2.000.
+ *
+ * This table is the missing identity. A delta is applied only when the insert
+ * here actually took, which makes `applyTransfers` idempotent under any replay
+ * depth.
+ */
+export const appliedTransfers = pgTable(
+  'applied_transfers',
+  {
+    txHash: text('tx_hash').notNull(),
+    logIndex: integer('log_index').notNull(),
+    /** Kept so the ledger can be pruned behind the reorg/replay horizon. */
+    blockNumber: bigint('block_number', { mode: 'bigint' }).notNull(),
+    appliedAt: timestamp('applied_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    identity: uniqueIndex('applied_transfers_tx_log_uq').on(t.txHash, t.logIndex),
+    blockIdx: index('applied_transfers_block_idx').on(t.blockNumber),
   }),
 );
 

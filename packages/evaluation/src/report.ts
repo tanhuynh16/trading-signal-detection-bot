@@ -124,6 +124,31 @@ export type ReportHeader = {
   generatedAt: Date;
 };
 
+/**
+ * A count of samples whose window the tails never ingested.
+ *
+ * Both tails once failed silently for two days while discovery, snapshots and
+ * signalling carried on: 828 of 1,242 signals (67%) were scored with zero trades
+ * and zero holder rows behind them. §21's coverage gate contained the damage —
+ * every one of those outcomes was written `incomplete_tail_coverage` rather than
+ * measured from an empty window — but nothing in the REPORT said so, and a
+ * reader counting signals rather than outcomes would have drawn conclusions from
+ * a window in which nothing could have been observed.
+ */
+export type CoverageWarning = { uningested: number; total: number };
+
+export function renderCoverageWarning(w: CoverageWarning): string {
+  if (w.uningested === 0) return '';
+  const pct = ((100 * w.uningested) / Math.max(w.total, 1)).toFixed(1);
+  return [
+    '',
+    `!! ${w.uningested} of ${w.total} samples (${pct}%) come from windows the swap tail`,
+    '   never ingested. Their features are not evidence about anything, and they',
+    '   must not be used to calibrate thresholds. Measured outcomes are unaffected:',
+    '   the coverage gate already refused to measure them.',
+  ].join('\n');
+}
+
 export function renderHeader(header: ReportHeader): string {
   return [
     `Strategy evaluation (§22) — strategyVersion=${header.strategyVersion}`,

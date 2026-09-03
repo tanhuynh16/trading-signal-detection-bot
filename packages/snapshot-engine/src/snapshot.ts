@@ -185,7 +185,7 @@ export async function captureSnapshot(
 }
 
 /** Price of the candidate token in the quote asset, per DEX pricing model. */
-function computePriceInQuote(input: {
+export function computePriceInQuote(input: {
   state: { sqrtPriceX96: bigint | null; reserve0: bigint; reserve1: bigint };
   baseIsToken0: boolean;
   baseDecimals: number;
@@ -194,6 +194,18 @@ function computePriceInQuote(input: {
   const { state, baseIsToken0, baseDecimals, quoteDecimals } = input;
   const decimals0 = baseIsToken0 ? baseDecimals : quoteDecimals;
   const decimals1 = baseIsToken0 ? quoteDecimals : baseDecimals;
+
+  // A V3 pool's sqrtPriceX96 is a tick, and a tick exists whether or not the
+  // pool holds anything. It is the price the pool WOULD trade at, not evidence
+  // that it can trade at all. Measured: 214 of 348 snapshots with a zero quote
+  // reserve still produced a USD price this way, while V2 — which prices from
+  // reserves — produced 0 of 1,129. Those 214 prices are fiction, and §21 freezes
+  // one of them as the immutable denominator of a return.
+  //
+  // Null here routes to §27's existing `no_signal_price`, which records honestly.
+  const quoteReserve = baseIsToken0 ? state.reserve1 : state.reserve0;
+  const baseReserve = baseIsToken0 ? state.reserve0 : state.reserve1;
+  if (quoteReserve <= 0n || baseReserve <= 0n) return null;
 
   if (state.sqrtPriceX96 !== null) {
     const token0InToken1 = priceFromSqrtPriceX96({
