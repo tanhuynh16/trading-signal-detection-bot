@@ -10,7 +10,7 @@ import {
   trades,
 } from '@sdb/database';
 import type { PublicClient } from 'viem';
-import { advanceCursor, readCursorState } from '@sdb/discovery';
+import { advanceCursor, backfillGapEnd, readCursorState } from '@sdb/discovery';
 import { ProviderHistoryUnavailableError } from '@sdb/shared';
 import { confirmedHead, detectReorg, SwapTail, SWAP_TAIL_SOURCE } from './swap-tail.js';
 
@@ -380,5 +380,130 @@ describe('a cursor older than the provider history window', () => {
 
     expect(rollback).not.toBeNull();
     expect(rollback!.actualHash).toBe('0x1000-a');
+  });
+});
+
+
+describe('a history gap must not veto outcome measurement forever', () => {
+  /** `gapOverlaps`' rule, inlined so the test states the semantics it depends on. */
+  const blocks = (gap: { fromTime: Date | null; toTime: Date | null }, w: { start: Date; end: Date }) =>
+    (gap.fromTime === null || gap.fromTime <= w.end) &&
+    (gap.toTime === null || gap.toTime >= w.start);
+
+  it('bounds the gap by the watermark, not by the unreadable block', async () => {
+    // The old code read `fromBlock`'s header — but that block being pruned is
+    // the whole reason we are recording a gap, so from_time was ALWAYS null.
+    const stale = 50_734_485n;
+    const head = 50_830_690n;
+    const watermarkTime = new Date('2026-09-03T15:40:00Z');
+    await advanceCursor(db, SWAP_TAIL_SOURCE, stale, watermarkTime, '0xdeadbeef');
+
+    const tail = new SwapTail({
+      db,
+      http: prunedChain(head - 128n),
+      logger: silentLogger,
+      config: {
+        chainId: CHAIN,
+        logChunkBlocks: 100,
+        maxTokenAgeMinutes: 360,
+        maxAddressesPerQuery: 100,
+        outcomeRetentionHours: 26,
+        confirmations: 5,
+        reorgDepth: 32,
+      },
+    });
+    await tail.drain(head, false);
+
+    const [gap] = await db
+      .select({ fromTime: ingestionGaps.fromTime, toTime: ingestionGaps.toTime })
+      .from(ingestionGaps)
+      .where(eq(ingestionGaps.source, SWAP_TAIL_SOURCE));
+
+    // The watermark is where coverage provably ended, so it is where the hole
+    // begins — and it costs no RPC.
+    expect(gap!.fromTime?.toISOString()).toBe(watermarkTime.toISOString());
+    expect(gap!.toTime).not.toBeNull();
+  });
+
+  it('a doubly-unbounded gap blocks every window until the end is backfilled', async () => {
+    // The exact live deadlock: two rows with both bounds null made 583 of 583
+    // outcomes report incomplete_tail_coverage while the tail ran 15s behind head.
+    await db.insert(ingestionGaps).values({
+      source: SWAP_TAIL_SOURCE,
+      fromBlock: 50_833_040n,
+      toBlock: 50_833_040n,
+      fromTime: null,
+      toTime: null,
+      reason: 'provider history window exceeded',
+    });
+
+    const laterWindow = {
+      start: new Date('2026-09-04T08:00:00Z'),
+      end: new Date('2026-09-04T08:15:00Z'),
+    };
+
+    const [before] = await db
+      .select({ fromTime: ingestionGaps.fromTime, toTime: ingestionGaps.toTime })
+      .from(ingestionGaps)
+      .where(eq(ingestionGaps.source, SWAP_TAIL_SOURCE));
+    expect(blocks(before!, laterWindow)).toBe(true); // vetoes a window hours later
+
+    const repaired = await backfillGapEnd(db, {
+      source: SWAP_TAIL_SOURCE,
+      watermarkBlock: 50_861_265n,
+      watermarkTime: new Date('2026-09-04T02:00:00Z'),
+    });
+    expect(repaired).toBe(1);
+
+    const [after] = await db
+      .select({ fromTime: ingestionGaps.fromTime, toTime: ingestionGaps.toTime })
+      .from(ingestionGaps)
+      .where(eq(ingestionGaps.source, SWAP_TAIL_SOURCE));
+    expect(blocks(after!, laterWindow)).toBe(false);
+  });
+
+  it('never touches a gap the watermark has not passed', async () => {
+    await db.insert(ingestionGaps).values({
+      source: SWAP_TAIL_SOURCE,
+      fromBlock: 50_900_000n,
+      toBlock: 50_900_500n,
+      fromTime: null,
+      toTime: null,
+      reason: 'provider history window exceeded',
+    });
+
+    const repaired = await backfillGapEnd(db, {
+      source: SWAP_TAIL_SOURCE,
+      watermarkBlock: 50_861_265n,
+      watermarkTime: new Date('2026-09-04T02:00:00Z'),
+    });
+
+    // Still ahead of the watermark, so its end is genuinely unknown and must
+    // keep reading as overlapping (ADR 0020).
+    expect(repaired).toBe(0);
+  });
+
+  it('never overwrites an end time that was actually observed', async () => {
+    const observed = new Date('2026-09-03T15:47:51Z');
+    await db.insert(ingestionGaps).values({
+      source: SWAP_TAIL_SOURCE,
+      fromBlock: 50_734_485n,
+      toBlock: 50_830_562n,
+      fromTime: null,
+      toTime: observed,
+      reason: 'provider history window exceeded',
+    });
+
+    await backfillGapEnd(db, {
+      source: SWAP_TAIL_SOURCE,
+      watermarkBlock: 50_861_265n,
+      watermarkTime: new Date('2026-09-04T02:00:00Z'),
+    });
+
+    const [row] = await db
+      .select({ toTime: ingestionGaps.toTime })
+      .from(ingestionGaps)
+      .where(eq(ingestionGaps.source, SWAP_TAIL_SOURCE));
+    expect(row!.toTime?.toISOString()).toBe(observed.toISOString());
   });
 });
