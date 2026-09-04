@@ -1,9 +1,10 @@
 import { and, eq, exists, gt, gte, ne, or, sql } from 'drizzle-orm';
 import type { Log, PublicClient } from 'viem';
-import { AdaptiveChunkSize, fetchLogsChunked } from '@sdb/blockchain';
+import { AdaptiveChunkSize, fetchLogsChunked, isHistoryUnavailable } from '@sdb/blockchain';
 import {
   advanceCursor,
   planRange,
+  backfillGapEnd,
   readCursorState,
   recordHistoryGap,
   rewindCursor,
@@ -200,7 +201,25 @@ async function blockHeader(
   client: PublicClient,
   block: bigint,
 ): Promise<{ time: Date; hash: string }> {
-  const header = await client.getBlock({ blockNumber: block, includeTransactions: false });
+  let header: { hash: string | null; timestamp: bigint };
+  try {
+    header = await client.getBlock({ blockNumber: block, includeTransactions: false });
+  } catch (error) {
+    // A block old enough to be pruned is not a transient failure, and this call
+    // is not only made near the head: `detectReorg` reads the block the cursor
+    // points at, which after any outage longer than the provider's window is
+    // exactly the block that no longer exists. Without this classification the
+    // raw provider error escaped drain()'s history handling, the tail retried
+    // forever, and it was measured stuck 86,779 blocks behind head while
+    // discovery and scoring carried on without trade data.
+    if (isHistoryUnavailable(error)) {
+      throw new ProviderHistoryUnavailableError(
+        `block header ${block} is beyond provider history`,
+        { block: block.toString(), cause: error instanceof Error ? error.message : String(error) },
+      );
+    }
+    throw error;
+  }
   if (header.hash === null) {
     // Only a pending block has a null hash, and we never ask for one.
     throw new Error(`block ${block} returned without a hash`);
@@ -326,14 +345,35 @@ export class SwapTail {
     logger: Logger,
   ): Promise<void> {
     const reseedTo = confirmedHead(head, this.deps.config.confirmations);
-    const bound = async (block: bigint): Promise<Date | null> => {
-      try {
-        return (await blockHeader(this.deps.http, block)).time;
-      } catch {
-        return null;
-      }
-    };
-    const [fromTime, toTime] = await Promise.all([bound(fromBlock), bound(reseedTo)]);
+
+    // The gap STARTS at the watermark, which is read from the cursor rather than
+    // from the chain.
+    //
+    // This used to bound the range by reading `fromBlock`'s header — but
+    // `fromBlock` is the pruned block that put us in this function, so that read
+    // could never succeed and `from_time` was ALWAYS null. Combined with
+    // `gapOverlaps` treating a null bound as overlapping (correctly: an unknown
+    // edge must not be resolved in favour of "covered"), a single gap with no
+    // readable bounds vetoed every outcome window forever. Measured: 583 of 583
+    // outcomes in eight hours returned `incomplete_tail_coverage` while the tail
+    // ran 15 seconds behind head.
+    //
+    // The watermark is the honest answer and needs no RPC: §21 defines it as
+    // "everything up to this instant was read and committed", so it is exactly
+    // where our coverage ends and the hole begins.
+    const state = await readCursorState(this.deps.db, SWAP_TAIL_SOURCE);
+    const fromTime = state?.lastProcessedBlockTime ?? null;
+
+    // The far edge is still best-effort — `reseedTo` sits at the confirmed head
+    // and is normally readable. When it is not, `backfillGapEnd` repairs it once
+    // the tail has demonstrably passed the gap, so a momentary failure here does
+    // not become a permanent veto either.
+    let toTime: Date | null = null;
+    try {
+      toTime = (await blockHeader(this.deps.http, reseedTo)).time;
+    } catch {
+      toTime = null;
+    }
 
     logger.warn(
       { fromBlock, toBlock: reseedTo, fromTime, toTime },
@@ -360,12 +400,28 @@ export class SwapTail {
       // Before anything else: is the chain we already indexed still the chain?
       // Doing this first means a drain never appends to a history it is about
       // to disown.
-      const rollback = await detectReorg(
-        this.deps.db,
-        this.deps.http,
-        SWAP_TAIL_SOURCE,
-        this.deps.config,
-      );
+      let rollback: RollbackResult | null;
+      try {
+        rollback = await detectReorg(
+          this.deps.db,
+          this.deps.http,
+          SWAP_TAIL_SOURCE,
+          this.deps.config,
+        );
+      } catch (error) {
+        if (!(error instanceof ProviderHistoryUnavailableError)) throw error;
+        // The block under the cursor is gone, so we can neither verify a reorg
+        // nor re-read the range. Skipping forward and recording the hole is the
+        // only truthful option — the same conclusion ADR 0023 reaches for the
+        // eth_getLogs path, which this one was missing.
+        //
+        // The gap starts at the cursor's OWN block, not cursor+1: we could not
+        // read even the block we claim to have processed, so that is where our
+        // honest knowledge ends.
+        const stale = await readCursorState(this.deps.db, SWAP_TAIL_SOURCE);
+        await this.skipUnservable(stale?.lastProcessedBlock ?? 0n, head, logger);
+        return { swaps: 0 };
+      }
       if (rollback) {
         logger.warn(
           {
@@ -466,6 +522,15 @@ export class SwapTail {
       // place. The hash is stamped in the same write, so the next drain can ask
       // whether this block is still the one we read.
       const watermark = await blockHeader(this.deps.http, plan.toBlock);
+      // The tail has now provably read past everything below this block, so any
+      // gap still missing an end time can be closed at this instant. Without
+      // this a gap whose far edge was momentarily unreadable vetoes every
+      // outcome window forever (see backfillGapEnd).
+      await backfillGapEnd(this.deps.db, {
+        source: SWAP_TAIL_SOURCE,
+        watermarkBlock: plan.toBlock,
+        watermarkTime: watermark.time,
+      });
       await advanceCursor(
         this.deps.db,
         SWAP_TAIL_SOURCE,

@@ -64,7 +64,14 @@ function text(error: unknown): string {
 function isRangeError(error: unknown): boolean {
   return RANGE_ERROR.test(text(error));
 }
-function isHistoryUnavailable(error: unknown): boolean {
+/**
+ * Exported so every call that can outrun the provider's history window shares
+ * ONE definition of what that looks like. `eth_getLogs` is not the only such
+ * call: the swap tail also reads block headers to detect reorgs, and a second
+ * copy of this regex living beside that code would be free to drift out of
+ * agreement with this one.
+ */
+export function isHistoryUnavailable(error: unknown): boolean {
   return HISTORY_ERROR.test(text(error));
 }
 function isRateLimited(error: unknown): boolean {

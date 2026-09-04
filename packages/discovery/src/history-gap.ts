@@ -1,3 +1,4 @@
+import { and, eq, isNull, lte } from 'drizzle-orm';
 import { ingestionGaps, jobsAudit, type Database } from '@sdb/database';
 import { reseedCursor } from './cursor.js';
 
@@ -64,4 +65,44 @@ export async function recordHistoryGap(db: Database, input: SkippedRange): Promi
   }
 
   await reseedCursor(db, input.source, input.reseedTo);
+}
+
+
+/**
+ * Give a gap an end time once the tail has demonstrably moved past it.
+ *
+ * `to_time` is read from the reseed target's header when the gap is recorded,
+ * which normally works — that block sits at the confirmed head. When it does
+ * not, the gap is stored with BOTH bounds null, and `gapOverlaps` reads a null
+ * bound as overlapping (correctly: an unknown edge must not be resolved in
+ * favour of "covered"). The result is a row that vetoes every outcome window
+ * ever, long after the tail has fully recovered. Measured on live data: two such
+ * rows made 583 of 583 outcomes in eight hours report
+ * `incomplete_tail_coverage` while the watermark sat 15 seconds behind head.
+ *
+ * The repair is to stamp the watermark's block time on any gap the watermark has
+ * now passed. That instant is at or after the gap's true end — the tail cannot
+ * have committed a later block without covering everything the gap describes —
+ * so it errs in the safe direction: it can only ever shrink the window a gap
+ * blocks, never claim coverage the tail does not have.
+ *
+ * Only null values are filled. A bound that was read from the chain is evidence
+ * and is never overwritten.
+ */
+export async function backfillGapEnd(
+  db: Database,
+  input: { source: string; watermarkBlock: bigint; watermarkTime: Date },
+): Promise<number> {
+  const rows = await db
+    .update(ingestionGaps)
+    .set({ toTime: input.watermarkTime })
+    .where(
+      and(
+        eq(ingestionGaps.source, input.source),
+        isNull(ingestionGaps.toTime),
+        lte(ingestionGaps.toBlock, input.watermarkBlock),
+      ),
+    )
+    .returning({ id: ingestionGaps.id });
+  return rows.length;
 }
